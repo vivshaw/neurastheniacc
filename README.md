@@ -14,25 +14,36 @@ The first implementation uses Rust, statically linked llama.cpp through `llama-c
 
 Build requirements: Rust with Cargo, CMake, and a C/C++ toolchain with libclang available for bindgen. On macOS, install Xcode Command Line Tools and CMake. On Debian/Ubuntu, the corresponding packages include `build-essential cmake clang libclang-dev`. Tested here with Rust 1.95 on macOS ARM64. Metal is compiled in on macOS; other platforms use CPU inference by default.
 
+Install [Wasmtime](https://docs.wasmtime.dev/cli-install.html) to run the generated module.
+
 ```sh
-cargo build --release --locked
+cargo build --release --locked --bin neuralcc
 
-# First use downloads about 1.12 GB, then compiles and checks the example.
-./target/release/neuralcc compile examples/mix.c -o runs/demo/mix.wasm --check
+# First use downloads about 1.12 GB, then compiles the example.
+./target/release/neuralcc compile examples/mix.c -o runs/demo/mix.wasm
 
-# Execute the generated program. No model is loaded for run or check.
-./target/release/neuralcc run runs/demo/mix.wasm --export mix 3 5
-# 107, if the candidate compiled correctly
-
-# Recheck a saved candidate against Clang with a different input seed.
-./target/release/neuralcc check examples/mix.c runs/demo/mix.wasm --cases 10000 --seed 42
+# Invoke the exported function in a standard Wasm runtime.
+wasmtime run --invoke mix runs/demo/mix.wasm 3 5
+# 107
 ```
 
-`--check` is explicit. Without it, `compile` validates the module and signature but marks its result `compiled_unchecked`. With it, a mismatch makes the command exit unsuccessfully and saves the counterexample. A valid but incorrect candidate is retained for inspection. No retry, instruction repair, or conventional compiler fallback occurs.
+The module exports `mix(i32, i32) -> i32`, so `--invoke mix` selects the function to call.
 
-The only output cleanup is removal of an optional single Markdown code fence. Unsupported source is rejected before inference.
+Alternatively, run it with Node.js:
 
-Initial measured results are in [benchmarks/README.md](benchmarks/README.md), with full raw responses in the archived JSON reports. The current 1.5B baseline passed 4 of 32 smoke programs; the demo passes, but the compiler is far from reliable.
+```sh
+node --input-type=module - <<'JS'
+import { readFileSync } from "node:fs";
+const { instance } = await WebAssembly.instantiate(
+  readFileSync("runs/demo/mix.wasm")
+);
+console.log(instance.exports.mix(3, 5) >>> 0);
+JS
+```
+
+`>>> 0` displays the return value as an unsigned 32-bit integer.
+
+`compile` generates and validates a Wasm module, writes the artifact, and reports `compiled`. Unsupported source is rejected before inference. The only output cleanup is removal of an optional single Markdown code fence.
 
 ## Model and cache
 
@@ -47,14 +58,14 @@ The cache is `$XDG_CACHE_HOME/neuralcc` when set, otherwise `~/Library/Caches/ne
 
 ```sh
 ./target/release/neuralcc fetch                # Download ahead of time
-./target/release/neuralcc --offline compile examples/mix.c --check
-./target/release/neuralcc --gpu-layers 0 --offline compile examples/mix.c --check
-./target/release/neuralcc --model /path/to/another.gguf compile examples/mix.c --check
+./target/release/neuralcc --offline compile examples/mix.c
+./target/release/neuralcc --gpu-layers 0 --offline compile examples/mix.c
+./target/release/neuralcc --model /path/to/another.gguf compile examples/mix.c
 ```
 
 `--offline` fails if the default model is absent, without contacting the network. `--model` uses the specified local GGUF and records its hash; it requires a chat template supported by llama.cpp. GPU acceleration requires access to the GPU, which some application sandboxes restrict. `--gpu-layers 0` explicitly selects CPU inference. The first Metal inference may also incur kernel initialization costs.
 
-The weights are the only downloaded runtime asset; there is no background process to manage. Clang is needed for `--check`, `check`, `bench`, and the automated tests, but not for unchecked compilation or Wasm execution.
+The weights are the only downloaded runtime asset; there is no background process to manage. Compilation and Wasm execution do not require Clang.
 
 ## Supported C subset
 
@@ -74,17 +85,29 @@ No pointers, allocation, arrays, loops, calls, recursion, casts, division, remai
 
 Source is capped at 32 KiB, 4096 tokens and 48 nesting levels. C line splicing and trigraphs are rejected. The validated token stream, with comments and the include removed, is sent to both the model and Clang. The oracle compiles the function in its own translation unit under a private symbol to avoid collisions with harness names and I/O macros.
 
-## Reliability experiment
+## Benchmarking
+
+The separate `neuralcc-bench` executable provides `run` for execution, `check` for comparing an artifact against Clang, and `bench` for compiling and evaluating a corpus. `check` and `bench` require Clang. Test failures do not change compilation reports or remove artifacts.
 
 ```sh
+cargo build --release --locked --bin neuralcc-bench
+
+# Run a saved artifact in the harness.
+./target/release/neuralcc-bench run runs/demo/mix.wasm --export mix 3 5
+
+# Compare it against Clang with a different input seed.
+./target/release/neuralcc-bench check examples/mix.c runs/demo/mix.wasm --cases 10000 --seed 42
+
 # Eight fixed programs plus 24 generated programs; output directory must be new.
-./target/release/neuralcc --offline bench \
+./target/release/neuralcc-bench bench --offline \
   --generated 24 --seed 20261014 --out-dir runs/my-baseline
 
 # Compare prompts while preserving the original result.
-./target/release/neuralcc --offline --prompt prompts/v1.txt bench \
+./target/release/neuralcc-bench bench --offline --prompt prompts/v1.txt \
   --generated 8 --out-dir runs/original-prompt
 ```
+
+Initial measured results are in [benchmarks/README.md](benchmarks/README.md), with full raw responses in the archived JSON reports. The current 1.5B baseline passed 4 of 32 smoke programs.
 
 Each function is tested against Clang `-std=c11 -O2` on a fixed 18 × 18 grid of edge values plus 1,000 seeded random input pairs by default. `--cases` changes the random count; the 324 edge pairs are always included. Testing stops at the first mismatch or runtime error and reports both the planned and executed counts. The RNG algorithm is fixed for reproducibility.
 
@@ -98,10 +121,11 @@ Outputs include:
 - `.prompt.txt`: exact system prompt.
 - `.wat`: extracted candidate, even if assembly fails.
 - `.wasm`: valid candidate, including candidates that fail differential checking.
-- `.report.json`: source, model/prompt/source/output hashes, inference settings, token counts, stop reason, timing, status and counterexample.
+- `.report.json`: compilation result, source, model/prompt/source/output hashes, inference settings, token counts, stop reason and timing.
+- `.check.json`: benchmark evaluation result and counterexample, with the compilation report nested separately.
 - `summary.json`: all benchmark reports, aggregate outcomes and Clang version.
 
-A benchmark exits nonzero if any program fails, **after** saving its results. Reports distinguish generation errors, truncation, malformed output, invalid Wasm, oracle errors, runtime errors, mismatches and passed tests. Source and model-loading errors stop before the benchmark can run.
+A benchmark exits nonzero if any program fails, **after** saving its results. Compilation reports distinguish generation errors, truncation, malformed output, invalid Wasm and successful compilation. Harness reports separately record check errors, runtime errors, mismatches and passed tests. Source and model-loading errors stop before the benchmark can run.
 
 Compilation time includes inference context creation, prompt processing, generation, assembly and module validation. Weight loading is reported separately; downloading and hashing are outside the compilation measurement. Wasm execution time includes fresh instance creation. The Clang reference timing includes compiling and running the oracle. These are not apples-to-apples code-performance benchmarks.
 
@@ -121,8 +145,12 @@ The tests require Clang but no model or network. They check front-end rejection,
 
 - `src/source.rs`: rejecting C front end; no code generation.
 - `src/model.rs`: cache, checksums, embedded inference and extraction.
-- `src/eval.rs`: Wasm execution, native Clang oracle, inputs and corpus generator.
-- `src/main.rs`: CLI, artifacts and reports.
+- `src/compile.rs`: compilation pipeline, artifacts and compilation reports.
+- `src/wasm.rs`: Wasm validation and execution.
+- `src/eval.rs`: test harness, native Clang oracle, inputs and corpus generator.
+- `src/main.rs`: compiler CLI (`fetch`, `compile`).
+- `src/bin/neuralcc-bench.rs`: execution and evaluation CLI (`run`, `check`, `bench`).
+- `src/cli.rs`: shared model options; `src/lib.rs`: shared library entry point.
 - `prompts/`: versioned prompts.
 - `fixtures/eval/`: fixed smoke corpus.
 

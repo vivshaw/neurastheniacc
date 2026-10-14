@@ -7,3 +7,4 @@
 *.report.json
 *.raw.txt
 *.prompt.txt
+*.check.json

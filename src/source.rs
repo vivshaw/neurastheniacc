@@ -1,5 +1,5 @@
 //! A rejecting front end, not a code generator. Only this validated C reaches Clang.
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use std::collections::HashSet;
 
 #[derive(Debug)]
@@ -296,6 +296,11 @@ fn literal(s: &str) -> Result<u32> {
         );
         Ok(digits.parse()?)
     }
+}
+
+pub fn read(path: &std::path::Path) -> Result<Source> {
+    parse(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)
+        .with_context(|| format!("unsupported source: {}", path.display()))
 }
 
 #[cfg(test)]

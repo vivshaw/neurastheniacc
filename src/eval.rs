@@ -1,4 +1,5 @@
 use crate::source::Source;
+use crate::wasm::Wasm;
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{
@@ -7,71 +8,10 @@ use std::{
     process::{Command, Stdio},
     time::Instant,
 };
-use wasmi::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
-
-pub struct Wasm {
-    engine: Engine,
-    module: Module,
-    export: String,
-}
-
-type Instance = (Store<StoreLimits>, TypedFunc<(i32, i32), i32>);
-
-impl Wasm {
-    pub fn new(bytes: &[u8], export: &str) -> Result<Self> {
-        ensure!(bytes.len() <= 1_048_576, "module exceeds 1 MiB");
-        for payload in wasmparser::Parser::new(0).parse_all(bytes) {
-            if let wasmparser::Payload::GlobalSection(globals) = payload? {
-                ensure!(
-                    globals.count() == 0,
-                    "globals are not allowed in pure functions"
-                );
-            }
-        }
-        let mut config = Config::default();
-        config.consume_fuel(true);
-        let engine = Engine::new(&config);
-        let module = Module::new(&engine, bytes).context("invalid Wasm")?;
-        ensure!(module.imports().next().is_none(), "imports are not allowed");
-        let this = Self {
-            engine,
-            module,
-            export: export.into(),
-        };
-        this.instance()?;
-        Ok(this)
-    }
-
-    fn instance(&self) -> Result<Instance> {
-        let limits = StoreLimitsBuilder::new()
-            .instances(1)
-            .memories(0)
-            .tables(0)
-            .build();
-        let mut store = Store::new(&self.engine, limits);
-        store.limiter(|limits| limits);
-        store.set_fuel(100_000)?;
-        let instance = Linker::new(&self.engine)
-            .instantiate(&mut store, &self.module)?
-            .ensure_no_start(&mut store)
-            .context("start functions are not allowed")?;
-        let func = instance
-            .get_typed_func::<(i32, i32), i32>(&store, &self.export)
-            .context("expected exported function (i32, i32) -> i32")?;
-        Ok((store, func))
-    }
-
-    pub fn run(&self, x: u32, y: u32) -> Result<u32> {
-        // Fresh state per input prevents one test from contaminating another.
-        let (mut store, func) = self.instance()?;
-        Ok(func.call(&mut store, (x as i32, y as i32))? as u32)
-    }
-}
-
 /// Fixed algorithm rather than a dependency's changing RNG: reproducible corpus and inputs.
-pub struct Rng(pub u64);
+struct Rng(u64);
 impl Rng {
-    pub fn next(&mut self) -> u32 {
+    fn next_u32(&mut self) -> u32 {
         self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
@@ -109,7 +49,7 @@ pub fn inputs(random: u32, seed: u64) -> Vec<[u32; 2]> {
     }
     let mut rng = Rng(seed);
     for _ in 0..random {
-        cases.push([rng.next(), rng.next()]);
+        cases.push([rng.next_u32(), rng.next_u32()]);
     }
     cases
 }
@@ -244,11 +184,11 @@ pub fn compare(source: &Source, wasm: &Wasm, random: u32, seed: u64) -> Result<C
 pub fn generated(count: u32, seed: u64) -> Vec<(String, String)> {
     let mut rng = Rng(seed);
     (0..count).map(|i| {
-        let a = rng.next();
-        let b = rng.next();
-        let shift = rng.next() % 32;
-        let op = ["+", "-", "*", "^", "&", "|"][rng.next() as usize % 6];
-        let cmp = ["<", ">", "<=", ">=", "==", "!="][rng.next() as usize % 6];
+        let a = rng.next_u32();
+        let b = rng.next_u32();
+        let shift = rng.next_u32() % 32;
+        let op = ["+", "-", "*", "^", "&", "|"][rng.next_u32() as usize % 6];
+        let cmp = ["<", ">", "<=", ">=", "==", "!="][rng.next_u32() as usize % 6];
         let body = match i % 4 {
             0 => format!("return (x {op} {a}u) ^ (y + {b}u);"),
             1 => format!("uint32_t z = (x + y) >> {shift}u; if (z {cmp} {a}u) {{ return z * {b}u; }} return ~z;"),
@@ -259,6 +199,47 @@ pub fn generated(count: u32, seed: u64) -> Vec<(String, String)> {
         let src = format!("uint32_t {name}(uint32_t x, uint32_t y) {{ {body} }}\n");
         (name, src)
     }).collect()
+}
+
+/// Harness outcome is separate from compilation success and its saved report.
+#[derive(Serialize)]
+pub struct Evaluation {
+    pub status: String,
+    pub compilation: crate::compile::Report,
+    pub check: Option<Check>,
+    pub error: Option<String>,
+}
+
+pub fn evaluate(
+    compilation: crate::compile::Report,
+    source: &Source,
+    artifact: &std::path::Path,
+    cases: u32,
+    seed: u64,
+) -> Evaluation {
+    let mut result = Evaluation {
+        status: compilation.status.clone(),
+        compilation,
+        check: None,
+        error: None,
+    };
+    if result.status != "compiled" {
+        return result;
+    }
+    match (|| -> Result<Check> {
+        let wasm = Wasm::new(&fs::read(artifact)?, &source.name)?;
+        compare(source, &wasm, cases, seed)
+    })() {
+        Ok(check) => {
+            result.status = check.status.into();
+            result.check = Some(check);
+        }
+        Err(error) => {
+            result.status = "check_error".into();
+            result.error = Some(format!("{error:#}"));
+        }
+    }
+    result
 }
 
 #[cfg(test)]
