@@ -1,0 +1,9 @@
+/benchmarks/
+/target/
+/.cache/
+/runs/
+*.wasm
+*.wat
+*.report.json
+*.raw.txt
+*.prompt.txt
