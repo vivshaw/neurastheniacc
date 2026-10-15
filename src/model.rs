@@ -17,10 +17,33 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const MODEL_FILE: &str = "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf";
-pub const MODEL_SHA: &str = "cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046";
-const MODEL_SIZE: u64 = 1_117_320_768;
-const MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/f86cb2c1fa58255f8052cc32aeede1b7482d4361/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf";
+pub struct ModelPreset {
+    pub file: &'static str,
+    pub sha: &'static str,
+    pub size: u64,
+    pub url: &'static str,
+    pub qwen_no_thinking: bool,
+}
+
+pub fn preset(name: &str) -> Option<ModelPreset> {
+    match name {
+        "low" => Some(ModelPreset {
+            file: "Qwen3.5-4B-Q4_K_M.gguf",
+            sha: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+            size: 2_740_937_888,
+            url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf",
+            qwen_no_thinking: true,
+        }),
+        "high" => Some(ModelPreset {
+            file: "Qwen3.8-27B-UD-Q4_K_M.gguf",
+            sha: "322e194ff79741c7baa497c240f677f54b201b0efab44ca8e50f122b39123482",
+            size: 16_464_440_224,
+            url: "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_M.gguf",
+            qwen_no_thinking: true,
+        }),
+        _ => None,
+    }
+}
 pub const DEFAULT_PROMPT: &str = include_str!("../prompts/v4.txt");
 
 fn hex(bytes: &[u8]) -> String {
@@ -57,37 +80,40 @@ pub fn default_cache() -> PathBuf {
     }
 }
 
-pub fn resolve(local: Option<&Path>, cache: &Path, offline: bool) -> Result<(PathBuf, String)> {
-    if let Some(path) = local {
+pub fn resolve(selection: &str, cache: &Path, offline: bool) -> Result<(PathBuf, String)> {
+    let Some(model) = preset(selection) else {
+        let path = Path::new(selection);
         return Ok((
             path.to_path_buf(),
             file_digest(path).context("reading local model")?,
         ));
-    }
-    let path = cache.join(MODEL_FILE);
+    };
+    let path = cache.join(model.file);
     if path.exists() {
         ensure!(
-            fs::metadata(&path)?.len() == MODEL_SIZE && file_digest(&path)? == MODEL_SHA,
+            fs::metadata(&path)?.len() == model.size && file_digest(&path)? == model.sha,
             "cached model checksum mismatch; remove {} and retry",
             path.display()
         );
-        return Ok((path, MODEL_SHA.to_string()));
+        return Ok((path, model.sha.to_string()));
     }
     ensure!(
         !offline,
-        "model is not cached at {}; run `neuralcc fetch` online first, or pass --model",
+        "model is not cached at {}; run `neuralcc --model {selection} fetch` online first",
         path.display()
     );
     fs::create_dir_all(cache)?;
     eprintln!(
-        "Downloading Qwen2.5-Coder 1.5B Q4_K_M (1.12 GB) to {}",
+        "Downloading {} ({:.2} GB) to {}",
+        model.file,
+        model.size as f64 / 1e9,
         path.display()
     );
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(3600))
         .build()?;
-    let mut response = client.get(MODEL_URL).send()?.error_for_status()?;
+    let mut response = client.get(model.url).send()?.error_for_status()?;
     // Unique temporary file + atomic rename: interrupted/concurrent downloads cannot poison the cache.
     let mut temporary = tempfile::NamedTempFile::new_in(cache)?;
     let mut hash = Sha256::new();
@@ -100,26 +126,26 @@ pub fn resolve(local: Option<&Path>, cache: &Path, offline: bool) -> Result<(Pat
             break;
         }
         size += n as u64;
-        ensure!(size <= MODEL_SIZE, "download exceeds expected model size");
+        ensure!(size <= model.size, "download exceeds expected model size");
         hash.update(&buf[..n]);
         temporary.write_all(&buf[..n])?;
         if last_update.elapsed() >= Duration::from_secs(3) {
             eprintln!(
                 "  {:.0}% ({:.0} MB)",
-                size as f64 / MODEL_SIZE as f64 * 100.0,
+                size as f64 / model.size as f64 * 100.0,
                 size as f64 / 1e6
             );
             last_update = Instant::now();
         }
     }
     ensure!(
-        size == MODEL_SIZE && hex(&hash.finalize()) == MODEL_SHA,
+        size == model.size && hex(&hash.finalize()) == model.sha,
         "download checksum/size mismatch"
     );
     temporary.as_file().sync_all()?;
     temporary.persist(&path)?;
     eprintln!("Model verified and cached.");
-    Ok((path, MODEL_SHA.to_string()))
+    Ok((path, model.sha.to_string()))
 }
 
 #[derive(Clone, Serialize)]
@@ -128,10 +154,12 @@ pub struct Settings {
     pub max_tokens: u32,
     pub threads: i32,
     pub gpu_layers: u32,
+    pub qwen_no_thinking: bool,
 }
 
 #[derive(Serialize)]
 pub struct Generation {
+    pub chat_prompt_sha256: String,
     pub raw: String,
     pub prompt_tokens: usize,
     pub output_tokens: usize,
@@ -193,7 +221,25 @@ impl Compiler {
             LlamaChatMessage::new("system".into(), self.prompt.clone())?,
             LlamaChatMessage::new("user".into(), source.into())?,
         ];
-        let prompt = self.model.apply_chat_template(&template, &messages, true)?;
+        let prompt = if self.settings.qwen_no_thinking {
+            let template_text = template.to_str()?;
+            ensure!(
+                template_text.contains("enable_thinking")
+                    && template_text.contains("<|im_start|>")
+                    && template_text.contains("</think>"),
+                "--qwen-no-thinking requires a Qwen ChatML template with enable_thinking support"
+            );
+            // Equivalent to Qwen3.8's official template with enable_thinking=false
+            // for our two text-only messages. llama.cpp's legacy template API
+            // recognizes ChatML but does not evaluate the Jinja thinking flag.
+            format!(
+                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                self.prompt.trim(),
+                source.trim()
+            )
+        } else {
+            self.model.apply_chat_template(&template, &messages, true)?
+        };
         let vocab = self.model.vocab();
         let tokens = vocab.tokenize(prompt.as_bytes(), true, true);
         ensure!(
@@ -239,6 +285,7 @@ impl Compiler {
             ctx.decode(&mut batch)?;
         }
         Ok(Generation {
+            chat_prompt_sha256: digest(prompt.as_bytes()),
             raw: String::from_utf8(bytes).context("model emitted invalid UTF-8")?,
             prompt_tokens: tokens.len(),
             output_tokens: count,
@@ -283,13 +330,13 @@ mod tests {
     fn offline_missing_cache_is_an_error_without_creating_files() {
         let temp = tempfile::tempdir().unwrap();
         let missing = temp.path().join("missing");
-        assert!(resolve(None, &missing, true).is_err());
+        assert!(resolve("high", &missing, true).is_err());
         assert!(!missing.exists());
     }
     #[test]
     fn corrupted_cache_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join(MODEL_FILE), "bad").unwrap();
-        assert!(resolve(None, temp.path(), true).is_err());
+        fs::write(temp.path().join(preset("high").unwrap().file), "bad").unwrap();
+        assert!(resolve("high", temp.path(), true).is_err());
     }
 }

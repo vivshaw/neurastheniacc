@@ -5,12 +5,12 @@ use std::{fs, path::PathBuf};
 
 #[derive(Args)]
 pub struct ModelOptions {
-    /// Use a local GGUF instead of the pinned default model.
-    #[arg(long, global = true)]
-    model: Option<PathBuf>,
+    /// Select high (27B), low (4B), or a local GGUF path.
+    #[arg(long, global = true, default_value = "high")]
+    model: String,
     #[arg(long, global = true)]
     cache_dir: Option<PathBuf>,
-    /// Never download; fail if the default model is absent from cache.
+    /// Never download; fail if the selected model is absent from cache.
     #[arg(long, global = true)]
     offline: bool,
     /// Override the versioned compiler system prompt.
@@ -25,6 +25,9 @@ pub struct ModelOptions {
     /// Use 0 for CPU-only inference. Metal is bundled on macOS.
     #[arg(long, global = true, default_value_t = 99)]
     gpu_layers: u32,
+    /// Use Qwen's explicit non-thinking chat format (requires a compatible template).
+    #[arg(long, global = true)]
+    qwen_no_thinking: bool,
 }
 
 impl ModelOptions {
@@ -43,6 +46,8 @@ impl ModelOptions {
                 max_tokens: self.max_tokens,
                 threads: self.threads,
                 gpu_layers: self.gpu_layers,
+                qwen_no_thinking: self.qwen_no_thinking
+                    || model::preset(&self.model).is_some_and(|preset| preset.qwen_no_thinking),
             },
             prompt,
         )
@@ -50,6 +55,6 @@ impl ModelOptions {
 
     pub fn resolve(&self) -> Result<(PathBuf, String)> {
         let cache = self.cache_dir.clone().unwrap_or_else(model::default_cache);
-        model::resolve(self.model.as_deref(), &cache, self.offline)
+        model::resolve(&self.model, &cache, self.offline)
     }
 }

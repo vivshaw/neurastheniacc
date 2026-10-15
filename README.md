@@ -3,7 +3,7 @@
 An experimental compiler whose code generator is a local language model.
 
 ```
-restricted unsigned C → Qwen Coder running inside Rust → WAT → .wasm
+restricted unsigned C → Qwen running inside Rust → WAT → .wasm
 ```
 
 No Ollama, model server, API key, or hosted inference. The executable downloads a pinned GGUF on first use, verifies its SHA-256, and caches it. The generated WebAssembly runs without a model. **This is a reliability experiment, not a production compiler.**
@@ -19,7 +19,7 @@ Install [Wasmtime](https://docs.wasmtime.dev/cli-install.html) to run the genera
 ```sh
 cargo build --release --locked --bin neuralcc
 
-# First use downloads about 1.12 GB, then compiles the example.
+# First use downloads about 16.46 GB, then compiles the example.
 ./target/release/neuralcc compile examples/mix.c -o runs/demo/mix.wasm
 
 # Invoke the exported function in a standard Wasm runtime.
@@ -47,23 +47,28 @@ JS
 
 ## Model and cache
 
-Default: [Qwen2.5-Coder-1.5B-Instruct, Q4_K_M](https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF), Apache-2.0 licensed. This small model is a baseline, not an assertion that 1.5B parameters are sufficient.
+`--model high` is the default. Both presets download pinned weights on first use and verify their size and SHA-256 before caching them.
 
-- Revision: `f86cb2c1fa58255f8052cc32aeede1b7482d4361`
-- File: `qwen2.5-coder-1.5b-instruct-q4_k_m.gguf`
-- SHA-256: `cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046`
-- Size: 1,117,320,768 bytes
+| Selection | Model | Download | Chat mode |
+| --- | --- | ---: | --- |
+| `high` (default) | [Qwen3.8-27B UD-Q4_K_M](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | 16.46 GB | Non-thinking, configured automatically |
+| `low` | [Qwen3.5-4B Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF) | 2.74 GB | Non-thinking, configured automatically |
 
-The cache is `$XDG_CACHE_HOME/neuralcc` when set, otherwise `~/Library/Caches/neuralcc` on macOS or `~/.cache/neuralcc` elsewhere. Override it with `--cache-dir`. Downloads use a temporary file and are atomically installed only after size and checksum validation. Interrupted downloads are discarded; the next attempt starts again. Cached weights are verified on each model-using invocation.
+The pinned revisions and checksums live in `src/model.rs`. The cache is `$XDG_CACHE_HOME/neuralcc` if set, otherwise `~/Library/Caches/neuralcc` on macOS or `~/.cache/neuralcc` elsewhere. Override it with `--cache-dir`. Existing cached downloads are reused. Downloads use a temporary file and are atomically installed only after size and checksum validation. Interrupted downloads are discarded; the next attempt starts again. Cached weights are verified on each model-using invocation.
 
 ```sh
-./target/release/neuralcc fetch                # Download ahead of time
+./target/release/neuralcc fetch                  # Cache high ahead of time
+./target/release/neuralcc --model low fetch      # Cache low ahead of time
+./target/release/neuralcc compile examples/mix.c # Uses high
+./target/release/neuralcc --model low compile examples/mix.c
 ./target/release/neuralcc --offline compile examples/mix.c
-./target/release/neuralcc --gpu-layers 0 --offline compile examples/mix.c
+./target/release/neuralcc --model low --gpu-layers 0 compile examples/mix.c
 ./target/release/neuralcc --model /path/to/another.gguf compile examples/mix.c
 ```
 
-`--offline` fails if the default model is absent, without contacting the network. `--model` uses the specified local GGUF and records its hash; it requires a chat template supported by llama.cpp. GPU acceleration requires access to the GPU, which some application sandboxes restrict. `--gpu-layers 0` explicitly selects CPU inference. The first Metal inference may also incur kernel initialization costs.
+`--offline` fails if the selected preset is absent, without contacting the network. `--model` also accepts a local GGUF path and records its hash; it requires a chat template supported by llama.cpp. GPU acceleration requires access to the GPU, which some application sandboxes restrict. `--gpu-layers 0` explicitly selects CPU inference. The first Metal inference may also incur kernel initialization costs.
+
+Both presets automatically use Qwen's text-only chat template with `enable_thinking=false`, including its empty thinking prefix. For a custom Qwen GGUF path, request this with `--qwen-no-thinking`. The setting and a hash of the complete rendered chat prompt are recorded in compilation reports. The compiler system prompt stays unchanged, and generated output is preserved without stripping reasoning or repairing code.
 
 The weights are the only downloaded runtime asset; there is no background process to manage. Compilation and Wasm execution do not require Clang.
 
@@ -99,15 +104,20 @@ cargo build --release --locked --bin neuralcc-bench
 ./target/release/neuralcc-bench check examples/mix.c runs/demo/mix.wasm --cases 10000 --seed 42
 
 # Eight fixed programs plus 24 generated programs; output directory must be new.
-./target/release/neuralcc-bench bench --offline \
+./target/release/neuralcc-bench bench --model low --offline \
   --generated 24 --seed 20261014 --out-dir runs/my-baseline
 
 # Compare prompts while preserving the original result.
-./target/release/neuralcc-bench bench --offline --prompt prompts/v1.txt \
+./target/release/neuralcc-bench bench --model low --offline --prompt prompts/v1.txt \
   --generated 8 --out-dir runs/original-prompt
+
+# Repeat the frozen v4 corpus with Qwen3.8-27B, greedy and non-thinking.
+./target/release/neuralcc-bench bench \
+  --model high \
+  --generated 24 --seed 20261014 --out-dir runs/qwen38-v4
 ```
 
-Initial measured results are in [benchmarks/README.md](benchmarks/README.md), with full raw responses in the archived JSON reports. The current 1.5B baseline passed 4 of 32 smoke programs.
+Measured results are in [benchmarks/README.md](benchmarks/README.md), with full raw responses in the archived JSON reports. On the same frozen 32-program corpus, the original 1.5B baseline passed 4/32, `low` (Qwen3.5-4B) passed 17/32, and `high` (Qwen3.8-27B) passed 31/32. Median compilation times were 0.73, 1.96, and 10.05 seconds respectively.
 
 Each function is tested against Clang `-std=c11 -O2` on a fixed 18 × 18 grid of edge values plus 1,000 seeded random input pairs by default. `--cases` changes the random count; the 324 edge pairs are always included. Testing stops at the first mismatch or runtime error and reports both the planned and executed counts. The RNG algorithm is fixed for reproducibility.
 

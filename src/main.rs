@@ -17,7 +17,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Download and verify the default model (no server required).
+    /// Download and verify the selected model (no server required).
     Fetch,
     /// Compile once; retain the raw response and a JSON report even on failure.
     Compile {

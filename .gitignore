@@ -2,6 +2,7 @@
 /target/
 /.cache/
 /runs/
+/models/
 *.wasm
 *.wat
 *.report.json
