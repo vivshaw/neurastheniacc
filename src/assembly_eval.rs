@@ -9,6 +9,7 @@ pub fn bench(
     output: &Path,
     cases: u32,
     seed: u64,
+    max_attempts: u32,
 ) -> Result<()> {
     ensure!(cases <= 1_000_000, "benchmark size exceeds limits");
     let mut paths = fs::read_dir(corpus)?
@@ -35,7 +36,7 @@ pub fn bench(
     for (path, input, reference_bytes, reference) in references {
         let name = path.file_stem().unwrap().to_string_lossy().into_owned();
         let artifact = output.join(format!("{name}.wasm"));
-        let compilation = assembly::assemble(compiler, &input, "f", &artifact)?;
+        let compilation = assembly::assemble(compiler, &input, "f", &artifact, max_attempts)?;
         fs::write(
             output.join(format!("{name}.reference.wasm")),
             &reference_bytes,
@@ -82,7 +83,7 @@ pub fn bench(
     fs::write(
         output.join("summary.json"),
         serde_json::to_string_pretty(&json!({
-            "schema_version":1,"programs":reports.len(),"counts":counts,"seed":seed,"random_inputs":cases,
+            "schema_version":2,"max_attempts":max_attempts,"programs":reports.len(),"counts":counts,"seed":seed,"random_inputs":cases,
             "model_load_seconds":compiler.load_seconds,"reports":reports
         }))?,
     )?;

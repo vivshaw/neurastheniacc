@@ -67,9 +67,9 @@ The default assembler is still `wat`. To make the model produce the binary encod
   --export f -o runs/model-assembly/add.wasm
 ```
 
-After C-to-WAT validation succeeds, the second stage runs once outside the repair loop. It uses the frozen `prompts/assembly-v1.txt` system prompt. The decoder accepts hexadecimal digits and ASCII whitespace only; it does not supply or repair any binary bytes. Validation requires the requested `(i32, i32) -> i32` export and the same execution restrictions as ordinary compilation. There is no conventional assembler fallback. `--prompt` overrides the C-to-WAT prompt only.
+After C-to-WAT validation succeeds, the second stage runs its own validation-feedback loop. `--attempts` limits each stage independently (five attempts per stage by default). Standalone `assemble --attempts 1` reproduces one-shot assembly. The binary loop feeds the original WAT, previous hex response, and actual hex-decoder/Wasm-validator diagnostics back to the model. It uses the frozen `prompts/assembly-v1.txt` system prompt. The decoder accepts hexadecimal digits and ASCII whitespace only; it does not supply or repair any binary bytes. Validation requires the requested `(i32, i32) -> i32` export and the same execution restrictions as ordinary compilation. There is no conventional assembler fallback. `--prompt` overrides the C-to-WAT prompt only.
 
-Each attempt saves `.assembly.input.wat`, `.assembly.prompt.txt`, `.assembly.raw.txt`, and `.assembly.report.json`. Successfully decoded bytes are saved as `.candidate.wasm`, including invalid modules. Only validated candidates receive the requested `.wasm` filename. Compilation report schema 4 records the selected assembler and nests the second-stage report.
+Each invocation saves `.assembly.input.wat`, `.assembly.prompt.txt`, `.assembly.raw.txt`, and `.assembly.report.json`. All attempt inputs, responses, decoded candidates and diagnostics are retained in a unique `*.assembly.attempts-…/` directory. Assembly report schema 2 includes the full history. Successfully decoded bytes are saved as `.candidate.wasm`, including invalid modules. Only validated candidates receive the requested `.wasm` filename. Compilation report schema 4 records the selected assembler and nests the second-stage report.
 
 Benchmark assembly independently of C translation:
 
@@ -79,7 +79,7 @@ cargo build --release --locked --bin neurastheniacc-bench
   --out-dir runs/assembly-trial
 ```
 
-This compares six frozen WAT fixtures against the `wat` reference assembler: arithmetic, signed LEB128, local declarations, branches, function/type indices, and multi-byte body/section lengths. All export `f`. It records byte equality separately from execution agreement on 324 edge pairs and 1,000 seeded random pairs. Reference binaries never enter model prompts. Results and failed candidates are retained; the benchmark exits nonzero when any case fails.
+This compares six frozen WAT fixtures against the `wat` reference assembler: arithmetic, signed LEB128, local declarations, branches, function/type indices, and multi-byte body/section lengths. All export `f`. It records byte equality separately from execution agreement on 324 edge pairs and 1,000 seeded random pairs. Reference binaries and execution counterexamples never enter model prompts. A valid binary stops the loop even if it implements the wrong behavior. Results and failed candidates are retained; the benchmark exits nonzero when any case fails.
 
 ## Model and cache
 

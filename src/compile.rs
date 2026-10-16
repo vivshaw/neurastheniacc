@@ -145,13 +145,14 @@ pub fn compile_with_options(
     if let Some(mut bytes) = bytes {
         let result = (|| -> Result<()> {
             if matches!(assembler, Assembler::Model) {
-                // Binary assembly is a separate experiment, outside the C-to-WAT repair loop.
+                // Each stage has its own bounded validation-feedback loop.
                 report.status = "assembly_error".into();
                 report.assembly = Some(crate::assembly::assemble(
                     compiler,
                     &fs::read_to_string(&last_wat)?,
                     &source.name,
                     output,
+                    max_attempts,
                 )?);
                 ensure!(
                     report.assembly.as_ref().unwrap().status == "assembled",

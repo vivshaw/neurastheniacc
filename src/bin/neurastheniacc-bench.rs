@@ -39,6 +39,8 @@ enum Commands {
     },
     /// Compare model-assembled binaries against wat on fixed WAT fixtures exporting f.
     Assembly {
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=5))]
+        attempts: u32,
         #[command(flatten)]
         model: ModelOptions,
         #[arg(long, default_value = "fixtures/assembly")]
@@ -76,6 +78,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
         Commands::Assembly {
+            attempts,
             model,
             corpus,
             out_dir,
@@ -83,7 +86,9 @@ fn main() -> Result<()> {
             seed,
         } => {
             let compiler = model.load()?;
-            neurastheniacc::assembly_eval::bench(&compiler, corpus, out_dir, *cases, *seed)?;
+            neurastheniacc::assembly_eval::bench(
+                &compiler, corpus, out_dir, *cases, *seed, *attempts,
+            )?;
         }
         Commands::Run { wasm, export, x, y } => {
             println!(
