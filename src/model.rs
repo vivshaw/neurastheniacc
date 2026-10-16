@@ -70,13 +70,13 @@ pub fn file_digest(path: &Path) -> Result<String> {
 
 pub fn default_cache() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
-        return PathBuf::from(dir).join("neuralcc");
+        return PathBuf::from(dir).join("neurastheniacc");
     }
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into()));
     if cfg!(target_os = "macos") {
-        home.join("Library/Caches/neuralcc")
+        home.join("Library/Caches/neurastheniacc")
     } else {
-        home.join(".cache/neuralcc")
+        home.join(".cache/neurastheniacc")
     }
 }
 
@@ -99,7 +99,7 @@ pub fn resolve(selection: &str, cache: &Path, offline: bool) -> Result<(PathBuf,
     }
     ensure!(
         !offline,
-        "model is not cached at {}; run `neuralcc --model {selection} fetch` online first",
+        "model is not cached at {}; run `neurastheniacc --model {selection} fetch` online first",
         path.display()
     );
     fs::create_dir_all(cache)?;

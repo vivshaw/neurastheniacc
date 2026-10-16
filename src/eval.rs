@@ -63,7 +63,7 @@ pub fn reference(source: &Source, cases: &[[u32; 2]]) -> Result<Vec<u32>> {
     // There are no calls in the supported subset, so renaming only the function is sufficient.
     let subject = source.canonical.replacen(
         &format!("uint32_t {} (", source.name),
-        "uint32_t neuralcc_subject (",
+        "uint32_t neurastheniacc_subject (",
         1,
     );
     fs::write(&subject_path, format!("#include <stdint.h>\n{subject}\n"))?;
@@ -71,11 +71,11 @@ pub fn reference(source: &Source, cases: &[[u32; 2]]) -> Result<Vec<u32>> {
 #include <inttypes.h>
 #include <stdio.h>
 _Static_assert(sizeof(unsigned int) == 4, "requires 32-bit unsigned int");
-extern uint32_t neuralcc_subject(uint32_t, uint32_t);
+extern uint32_t neurastheniacc_subject(uint32_t, uint32_t);
 int main(void) {
     uint32_t ncc_x, ncc_y;
     while (scanf("%" SCNu32 " %" SCNu32, &ncc_x, &ncc_y) == 2) {
-        printf("%" PRIu32 "\n", neuralcc_subject(ncc_x, ncc_y));
+        printf("%" PRIu32 "\n", neurastheniacc_subject(ncc_x, ncc_y));
     }
     return 0;
 }

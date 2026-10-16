@@ -1,4 +1,4 @@
-# neuralcc
+# neurastheniacc
 
 An experimental compiler whose code generator is a local language model.
 
@@ -17,10 +17,10 @@ Build requirements: Rust with Cargo, CMake, and a C/C++ toolchain with libclang 
 Install [Wasmtime](https://docs.wasmtime.dev/cli-install.html) to run the generated module.
 
 ```sh
-cargo build --release --locked --bin neuralcc
+cargo build --release --locked --bin neurastheniacc
 
 # First use downloads about 16.46 GB, then compiles the example.
-./target/release/neuralcc compile examples/mix.c -o runs/demo/mix.wasm
+./target/release/neurastheniacc compile examples/mix.c -o runs/demo/mix.wasm
 
 # Invoke the exported function in a standard Wasm runtime.
 wasmtime run --invoke mix runs/demo/mix.wasm 3 5
@@ -54,16 +54,16 @@ JS
 | `high` (default) | [Qwen3.8-27B UD-Q4_K_M](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | 16.46 GB | Non-thinking, configured automatically |
 | `low` | [Qwen3.5-4B Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF) | 2.74 GB | Non-thinking, configured automatically |
 
-The pinned revisions and checksums live in `src/model.rs`. The cache is `$XDG_CACHE_HOME/neuralcc` if set, otherwise `~/Library/Caches/neuralcc` on macOS or `~/.cache/neuralcc` elsewhere. Override it with `--cache-dir`. Existing cached downloads are reused. Downloads use a temporary file and are atomically installed only after size and checksum validation. Interrupted downloads are discarded; the next attempt starts again. Cached weights are verified on each model-using invocation.
+The pinned revisions and checksums live in `src/model.rs`. The cache is `$XDG_CACHE_HOME/neurastheniacc` if set, otherwise `~/Library/Caches/neurastheniacc` on macOS or `~/.cache/neurastheniacc` elsewhere. Override it with `--cache-dir`. Existing downloads in the former `neuralcc` cache are also reused when the selected model is absent from the new cache and `--cache-dir` is not set. Downloads use a temporary file and are atomically installed only after size and checksum validation. Interrupted downloads are discarded; the next attempt starts again. Cached weights are verified on each model-using invocation.
 
 ```sh
-./target/release/neuralcc fetch                  # Cache high ahead of time
-./target/release/neuralcc --model low fetch      # Cache low ahead of time
-./target/release/neuralcc compile examples/mix.c # Uses high
-./target/release/neuralcc --model low compile examples/mix.c
-./target/release/neuralcc --offline compile examples/mix.c
-./target/release/neuralcc --model low --gpu-layers 0 compile examples/mix.c
-./target/release/neuralcc --model /path/to/another.gguf compile examples/mix.c
+./target/release/neurastheniacc fetch                  # Cache high ahead of time
+./target/release/neurastheniacc --model low fetch      # Cache low ahead of time
+./target/release/neurastheniacc compile examples/mix.c # Uses high
+./target/release/neurastheniacc --model low compile examples/mix.c
+./target/release/neurastheniacc --offline compile examples/mix.c
+./target/release/neurastheniacc --model low --gpu-layers 0 compile examples/mix.c
+./target/release/neurastheniacc --model /path/to/another.gguf compile examples/mix.c
 ```
 
 `--offline` fails if the selected preset is absent, without contacting the network. `--model` also accepts a local GGUF path and records its hash; it requires a chat template supported by llama.cpp. GPU acceleration requires access to the GPU, which some application sandboxes restrict. `--gpu-layers 0` explicitly selects CPU inference. The first Metal inference may also incur kernel initialization costs.
@@ -92,27 +92,27 @@ Source is capped at 32 KiB, 4096 tokens and 48 nesting levels. C line splicing a
 
 ## Benchmarking
 
-The separate `neuralcc-bench` executable provides `run` for execution, `check` for comparing an artifact against Clang, and `bench` for compiling and evaluating a corpus. `check` and `bench` require Clang. Test failures do not change compilation reports or remove artifacts.
+The separate `neurastheniacc-bench` executable provides `run` for execution, `check` for comparing an artifact against Clang, and `bench` for compiling and evaluating a corpus. `check` and `bench` require Clang. Test failures do not change compilation reports or remove artifacts.
 
 ```sh
-cargo build --release --locked --bin neuralcc-bench
+cargo build --release --locked --bin neurastheniacc-bench
 
 # Run a saved artifact in the harness.
-./target/release/neuralcc-bench run runs/demo/mix.wasm --export mix 3 5
+./target/release/neurastheniacc-bench run runs/demo/mix.wasm --export mix 3 5
 
 # Compare it against Clang with a different input seed.
-./target/release/neuralcc-bench check examples/mix.c runs/demo/mix.wasm --cases 10000 --seed 42
+./target/release/neurastheniacc-bench check examples/mix.c runs/demo/mix.wasm --cases 10000 --seed 42
 
 # Eight fixed programs plus 24 generated programs; output directory must be new.
-./target/release/neuralcc-bench bench --model low --offline \
+./target/release/neurastheniacc-bench bench --model low --offline \
   --generated 24 --seed 20261014 --out-dir runs/my-baseline
 
 # Compare prompts while preserving the original result.
-./target/release/neuralcc-bench bench --model low --offline --prompt prompts/v1.txt \
+./target/release/neurastheniacc-bench bench --model low --offline --prompt prompts/v1.txt \
   --generated 8 --out-dir runs/original-prompt
 
 # Repeat the frozen v4 corpus with Qwen3.8-27B, greedy and non-thinking.
-./target/release/neuralcc-bench bench \
+./target/release/neurastheniacc-bench bench \
   --model high \
   --generated 24 --seed 20261014 --out-dir runs/qwen38-v4
 ```
@@ -159,7 +159,7 @@ The tests require Clang but no model or network. They check front-end rejection,
 - `src/wasm.rs`: Wasm validation and execution.
 - `src/eval.rs`: test harness, native Clang oracle, inputs and corpus generator.
 - `src/main.rs`: compiler CLI (`fetch`, `compile`).
-- `src/bin/neuralcc-bench.rs`: execution and evaluation CLI (`run`, `check`, `bench`).
+- `src/bin/neurastheniacc-bench.rs`: execution and evaluation CLI (`run`, `check`, `bench`).
 - `src/cli.rs`: shared model options; `src/lib.rs`: shared library entry point.
 - `prompts/`: versioned prompts.
 - `fixtures/eval/`: fixed smoke corpus.

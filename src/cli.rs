@@ -55,6 +55,16 @@ impl ModelOptions {
 
     pub fn resolve(&self) -> Result<(PathBuf, String)> {
         let cache = self.cache_dir.clone().unwrap_or_else(model::default_cache);
+        // Reuse verified weights downloaded before the compiler was renamed.
+        if self.cache_dir.is_none()
+            && let Some(preset) = model::preset(&self.model)
+            && !cache.join(preset.file).exists()
+        {
+            let legacy_cache = cache.with_file_name("neuralcc");
+            if legacy_cache.join(preset.file).exists() {
+                return model::resolve(&self.model, &legacy_cache, self.offline);
+            }
+        }
         model::resolve(&self.model, &cache, self.offline)
     }
 }

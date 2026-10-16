@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
-use neuralcc::{cli::ModelOptions, compile, eval, source, wasm};
+use neurastheniacc::{cli::ModelOptions, compile, eval, source, wasm};
 use std::{
     collections::BTreeMap,
     fs,
@@ -9,7 +9,10 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "Run and evaluate neuralcc's generated WebAssembly")]
+#[command(
+    version,
+    about = "Run and evaluate neurastheniacc's generated WebAssembly"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

@@ -1,6 +1,6 @@
 use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
-use neuralcc::{cli::ModelOptions, compile, source};
+use neurastheniacc::{cli::ModelOptions, compile, source};
 use std::{fs, path::PathBuf};
 
 #[derive(Parser)]

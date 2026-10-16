@@ -1,8 +1,8 @@
 [package]
-name = "neuralcc"
+name = "neurastheniacc"
 version = "0.1.0"
 edition = "2024"
-default-run = "neuralcc"
+default-run = "neurastheniacc"
 
 [dependencies]
 anyhow = "1.0.104"
