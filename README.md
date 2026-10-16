@@ -43,7 +43,15 @@ JS
 
 `>>> 0` displays the return value as an unsigned 32-bit integer.
 
-`compile` generates and validates a Wasm module, writes the artifact, and reports `compiled`. Unsupported source is rejected before inference. The only output cleanup is removal of an optional single Markdown code fence.
+`compile` generates WAT, assembles it, and validates the module and exported signature. If validation fails, it sends the original C, the previous response, and the diagnostic back to the model. It stops at the first valid module or after **five total attempts** (the initial translation plus up to four repairs). Use `--attempts 1` for one-shot compilation, or choose any limit from 1 to 5.
+
+```sh
+./target/release/neurastheniacc compile examples/mix.c --attempts 5 -o runs/repair/mix.wasm
+```
+
+This loop belongs to the compiler. It uses syntax, Wasm type/structure validation, and export checks; it does not use Clang results or semantic counterexamples. A valid but incorrect translation stops the loop too. Each retry has a fresh inference context with the same system prompt, source, token budget, and decoding settings; it receives only the most recent candidate and diagnostic, avoiding unbounded history growth. Token-limit failures can be retried; inference/context errors stop immediately.
+
+All attempts are retained in a unique directory beside the output (`mix.attempts-…/`), with exact inputs, responses, extracted WAT, diagnostics, and validated binaries. The final report lists that directory and every attempt. The requested `.wasm` is written only after success. Unsupported source is rejected before inference; the only text cleanup is removal of an optional single Markdown code fence.
 
 ## Experimental model assembly
 
@@ -59,9 +67,9 @@ The default assembler is still `wat`. To make the model produce the binary encod
   --export f -o runs/model-assembly/add.wasm
 ```
 
-The second stage uses the frozen `prompts/assembly-v1.txt` system prompt. The decoder accepts hexadecimal digits and ASCII whitespace only; it does not supply or repair any binary bytes. Validation requires the requested `(i32, i32) -> i32` export and the same execution restrictions as ordinary compilation. There is no conventional assembler fallback. `--prompt` overrides the C-to-WAT prompt only.
+After C-to-WAT validation succeeds, the second stage runs once outside the repair loop. It uses the frozen `prompts/assembly-v1.txt` system prompt. The decoder accepts hexadecimal digits and ASCII whitespace only; it does not supply or repair any binary bytes. Validation requires the requested `(i32, i32) -> i32` export and the same execution restrictions as ordinary compilation. There is no conventional assembler fallback. `--prompt` overrides the C-to-WAT prompt only.
 
-Each attempt saves `.assembly.input.wat`, `.assembly.prompt.txt`, `.assembly.raw.txt`, and `.assembly.report.json`. Successfully decoded bytes are saved as `.candidate.wasm`, including invalid modules. Only validated candidates receive the requested `.wasm` filename. Compilation report schema 3 records the selected assembler and nests the second-stage report.
+Each attempt saves `.assembly.input.wat`, `.assembly.prompt.txt`, `.assembly.raw.txt`, and `.assembly.report.json`. Successfully decoded bytes are saved as `.candidate.wasm`, including invalid modules. Only validated candidates receive the requested `.wasm` filename. Compilation report schema 4 records the selected assembler and nests the second-stage report.
 
 Benchmark assembly independently of C translation:
 
@@ -96,7 +104,7 @@ The pinned revisions and checksums live in `src/model.rs`. The cache is `$XDG_CA
 
 `--offline` fails if the selected preset is absent, without contacting the network. `--model` also accepts a local GGUF path and records its hash; it requires a chat template supported by llama.cpp. GPU acceleration requires access to the GPU, which some application sandboxes restrict. `--gpu-layers 0` explicitly selects CPU inference. The first Metal inference may also incur kernel initialization costs.
 
-Both presets automatically use Qwen's text-only chat template with `enable_thinking=false`, including its empty thinking prefix. For a custom Qwen GGUF path, request this with `--qwen-no-thinking`. The setting and a hash of the complete rendered chat prompt are recorded in compilation reports. The compiler system prompt stays unchanged, and generated output is preserved without stripping reasoning or repairing code.
+Both presets automatically use Qwen's text-only chat template with `enable_thinking=false`, including its empty thinking prefix. For a custom Qwen GGUF path, request this with `--qwen-no-thinking`. The setting and a hash of the complete rendered chat prompt are recorded in compilation reports. The compiler system prompt stays unchanged, and every model response is preserved. Repairs are new model responses driven by validator feedback, not edits made by the compiler.
 
 The weights are the only downloaded runtime asset; there is no background process to manage. Compilation and Wasm execution do not require Clang.
 
@@ -136,30 +144,30 @@ cargo build --release --locked --bin neurastheniacc-bench
   --generated 24 --seed 20261014 --out-dir runs/my-baseline
 
 # Compare prompts while preserving the original result.
-./target/release/neurastheniacc-bench bench --model low --offline --prompt prompts/v1.txt \
+./target/release/neurastheniacc-bench bench --model low --attempts 1 --offline --prompt prompts/v1.txt \
   --generated 8 --out-dir runs/original-prompt
 
-# Repeat the frozen v4 corpus with Qwen3.8-27B, greedy and non-thinking.
+# Reproduce the one-shot v4 corpus with Qwen3.8-27B.
 ./target/release/neurastheniacc-bench bench \
-  --model high \
+  --model high --attempts 1 \
   --generated 24 --seed 20261014 --out-dir runs/qwen38-v4
 ```
 
-Measured results are in [benchmarks/README.md](benchmarks/README.md), with full raw responses in the archived JSON reports. On the same frozen 32-program corpus, the original 1.5B baseline passed 4/32, `low` (Qwen3.5-4B) passed 17/32, and `high` (Qwen3.8-27B) passed 31/32. Median compilation times were 0.73, 1.96, and 10.05 seconds respectively.
+Measured results are in [benchmarks/README.md](benchmarks/README.md), with full raw responses in the archived JSON reports. In the historical one-shot runs on the same frozen 32-program corpus, the original 1.5B baseline passed 4/32, `low` (Qwen3.5-4B) passed 17/32, and `high` (Qwen3.8-27B) passed 31/32. Median compilation times were 0.73, 1.96, and 10.05 seconds respectively.
 
 Each function is tested against Clang `-std=c11 -O2` on a fixed 18 × 18 grid of edge values plus 1,000 seeded random input pairs by default. `--cases` changes the random count; the 324 edge pairs are always included. Testing stops at the first mismatch or runtime error and reports both the planned and executed counts. The RNG algorithm is fixed for reproducibility.
 
-The model stays loaded across a benchmark, but every function receives a fresh inference context. Decoding is greedy. This does **not** promise identical bytes across hardware or inference-library versions.
+The benchmark calls the same compiler loop as `compile`, with five total attempts by default. `bench --attempts 1` reproduces the one-shot baselines. The model stays loaded across a benchmark, but every generation attempt receives a fresh inference context. Decoding is greedy. This does **not** promise identical bytes across hardware or inference-library versions.
 
 Every candidate is checked for a correct `(i32, i32) -> i32` export. Execution forbids imports, start functions, globals, memories and tables. Each input runs in a fresh Wasm instance with a 100,000-unit fuel limit. These restrictions are part of this prototype's contract.
 
 Outputs include:
 
-- `.raw.txt`: unmodified model response.
+- `.raw.txt`: unmodified final model response; earlier responses live in the attempt directory.
 - `.prompt.txt`: exact system prompt.
 - `.wat`: extracted candidate, even if assembly fails.
 - `.wasm`: valid candidate, including candidates that fail differential checking.
-- `.report.json`: compilation result, source, model/prompt/source/output hashes, inference settings, token counts, stop reason and timing.
+- `.report.json`: compilation result, every attempt and feedback input, source/model/prompt/output hashes, inference settings, token counts, stop reasons and total timing.
 - `.check.json`: benchmark evaluation result and counterexample, with the compilation report nested separately.
 - `summary.json`: all benchmark reports, aggregate outcomes and Clang version.
 
@@ -179,7 +187,7 @@ cargo clippy --release --locked --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-The tests require Clang but no model or network. They check front-end rejection, wrapping arithmetic, unsigned comparison counterexamples, bounded Wasm execution, forbidden module features, generated source validity, cache failure modes and strict output extraction.
+The tests require Clang but no model or network. They check front-end rejection, wrapping arithmetic, unsigned comparison counterexamples, bounded Wasm execution, forbidden module features, generated source validity, cache failure modes, strict output extraction, feedback propagation, retry limits, and stopping on validation success without semantic feedback.
 
 - `src/source.rs`: rejecting C front end; no code generation.
 - `src/model.rs`: cache, checksums, embedded inference and extraction.

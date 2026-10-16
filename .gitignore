@@ -11,3 +11,5 @@
 *.check.json
 
 !fixtures/assembly/*.wat
+
+*.attempts-*/

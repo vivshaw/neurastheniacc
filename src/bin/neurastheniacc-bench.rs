@@ -50,12 +50,15 @@ enum Commands {
         #[arg(long, default_value_t = 20261015)]
         seed: u64,
     },
-    /// Measure first-attempt results across a corpus. No repair or fallback.
+    /// Measure the compiler across a corpus; semantic checks do not feed back into compilation.
     Bench {
         #[command(flatten)]
         model: ModelOptions,
         #[arg(long, default_value = "fixtures/eval")]
         corpus: PathBuf,
+        /// Compiler generation budget per program; 1 reproduces one-shot behavior.
+        #[arg(long, default_value_t = compile::DEFAULT_ATTEMPTS, value_parser = clap::value_parser!(u32).range(1..=5))]
+        attempts: u32,
         /// Add programs from the seeded template generator.
         #[arg(long, default_value_t = 0)]
         generated: u32,
@@ -104,6 +107,7 @@ fn main() -> Result<()> {
             model,
             corpus,
             generated,
+            attempts,
             cases,
             seed,
             out_dir,
@@ -155,7 +159,13 @@ fn main() -> Result<()> {
             for (name, source) in sources {
                 fs::write(output.join(format!("{name}.c")), &source.canonical)?;
                 let artifact = output.join(format!("{name}.wasm"));
-                let compilation = compile::compile_one(&compiler, &source, &artifact)?;
+                let compilation = compile::compile_with_options(
+                    &compiler,
+                    &source,
+                    &artifact,
+                    compile::Assembler::Wat,
+                    *attempts,
+                )?;
                 let report = eval::evaluate(compilation, &source, &artifact, *cases, *seed);
                 fs::write(
                     artifact.with_extension("check.json"),
@@ -171,7 +181,7 @@ fn main() -> Result<()> {
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
             let summary = serde_json::json!({
-                "schema_version": 2, "programs": reports.len(), "counts": counts,
+                "schema_version": 3, "max_attempts": attempts, "programs": reports.len(), "counts": counts,
                 "seed": seed, "random_inputs_per_program": cases,
                 "edge_inputs_per_program": eval::inputs(0, *seed).len(),
                 "benchmark_seconds_excluding_model_load": start.elapsed().as_secs_f64(),

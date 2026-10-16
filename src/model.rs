@@ -157,7 +157,7 @@ pub struct Settings {
     pub qwen_no_thinking: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Generation {
     pub chat_prompt_sha256: String,
     pub raw: String,

@@ -27,13 +27,16 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Compile once; retain the raw response and a JSON report even on failure.
+    /// Compile C with validation feedback; retain every attempt, including failures.
     Compile {
         source: PathBuf,
         #[arg(short, long)]
         output: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "wat")]
         assembler: compile::Assembler,
+        /// Total generation attempts, including the initial translation.
+        #[arg(long, default_value_t = compile::DEFAULT_ATTEMPTS, value_parser = clap::value_parser!(u32).range(1..=5))]
+        attempts: u32,
     },
 }
 
@@ -66,6 +69,7 @@ fn main() -> Result<()> {
             source,
             output,
             assembler,
+            attempts,
         } => {
             let parsed = source::read(source)?;
             let output = output
@@ -78,7 +82,8 @@ fn main() -> Result<()> {
                 );
             }
             let compiler = cli.model.load()?;
-            let report = compile::compile_with_assembler(&compiler, &parsed, &output, *assembler)?;
+            let report =
+                compile::compile_with_options(&compiler, &parsed, &output, *assembler, *attempts)?;
             ensure!(
                 report.status == "compiled",
                 "compilation failed; see {}",
