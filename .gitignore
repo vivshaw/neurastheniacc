@@ -9,3 +9,5 @@
 *.raw.txt
 *.prompt.txt
 *.check.json
+
+!fixtures/assembly/*.wat

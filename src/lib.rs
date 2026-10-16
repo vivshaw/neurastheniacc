@@ -1,3 +1,5 @@
+pub mod assembly;
+pub mod assembly_eval;
 pub mod cli;
 pub mod compile;
 pub mod eval;

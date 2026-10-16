@@ -212,13 +212,17 @@ impl Compiler {
     }
 
     pub fn generate(&self, source: &str) -> Result<Generation> {
+        self.generate_with_prompt(&self.prompt, source)
+    }
+
+    pub fn generate_with_prompt(&self, system: &str, source: &str) -> Result<Generation> {
         let start = Instant::now();
         let template = self
             .model
             .chat_template(None)
             .context("model needs a supported chat template")?;
         let messages = [
-            LlamaChatMessage::new("system".into(), self.prompt.clone())?,
+            LlamaChatMessage::new("system".into(), system.into())?,
             LlamaChatMessage::new("user".into(), source.into())?,
         ];
         let prompt = if self.settings.qwen_no_thinking {
@@ -234,7 +238,7 @@ impl Compiler {
             // recognizes ChatML but does not evaluate the Jinja thinking flag.
             format!(
                 "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
-                self.prompt.trim(),
+                system.trim(),
                 source.trim()
             )
         } else {

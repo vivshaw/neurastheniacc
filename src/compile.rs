@@ -23,9 +23,27 @@ pub struct Report {
     error: Option<String>,
     generation: Option<Generation>,
     wasm_sha256: Option<String>,
+    assembler: Assembler,
+    assembly: Option<crate::assembly::Report>,
+}
+
+#[derive(Clone, Copy, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Assembler {
+    Wat,
+    Model,
 }
 
 pub fn compile_one(compiler: &Compiler, source: &source::Source, output: &Path) -> Result<Report> {
+    compile_with_assembler(compiler, source, output, Assembler::Wat)
+}
+
+pub fn compile_with_assembler(
+    compiler: &Compiler,
+    source: &source::Source,
+    output: &Path,
+    assembler: Assembler,
+) -> Result<Report> {
     ensure!(
         output.extension().is_some_and(|ext| ext == "wasm"),
         "output must have a .wasm extension"
@@ -38,6 +56,11 @@ pub fn compile_one(compiler: &Compiler, source: &source::Source, output: &Path) 
         output.to_path_buf(),
         output.with_extension("wat"),
         output.with_extension("raw.txt"),
+        output.with_extension("candidate.wasm"),
+        output.with_extension("assembly.raw.txt"),
+        output.with_extension("assembly.input.wat"),
+        output.with_extension("assembly.prompt.txt"),
+        output.with_extension("assembly.report.json"),
     ] {
         if path.exists() {
             fs::remove_file(path)?;
@@ -45,7 +68,7 @@ pub fn compile_one(compiler: &Compiler, source: &source::Source, output: &Path) 
     }
     fs::write(output.with_extension("prompt.txt"), &compiler.prompt)?;
     let mut report = Report {
-        schema_version: 2,
+        schema_version: 3,
         compiler_version: env!("CARGO_PKG_VERSION"),
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         model_sha256: compiler.model_sha256.clone(),
@@ -60,6 +83,8 @@ pub fn compile_one(compiler: &Compiler, source: &source::Source, output: &Path) 
         error: None,
         generation: None,
         wasm_sha256: None,
+        assembler,
+        assembly: None,
     };
     let start = Instant::now();
     let result = (|| -> Result<()> {
@@ -75,7 +100,23 @@ pub fn compile_one(compiler: &Compiler, source: &source::Source, output: &Path) 
         report.status = "invalid_output".into();
         let wat = model::extract_wat(&generation.raw)?;
         fs::write(output.with_extension("wat"), &wat)?;
-        let bytes = wat::parse_str(&wat).context("assembling generated WAT")?;
+        let bytes = match assembler {
+            Assembler::Wat => wat::parse_str(&wat).context("assembling generated WAT")?,
+            Assembler::Model => {
+                report.status = "assembly_error".into();
+                report.assembly = Some(crate::assembly::assemble(
+                    compiler,
+                    &wat,
+                    &source.name,
+                    output,
+                )?);
+                ensure!(
+                    report.assembly.as_ref().unwrap().status == "assembled",
+                    "model assembly failed; see assembly report"
+                );
+                fs::read(output)?
+            }
+        };
         report.status = "invalid_wasm".into();
         crate::wasm::Wasm::new(&bytes, &source.name)?;
         report.wasm_sha256 = Some(model::digest(&bytes));

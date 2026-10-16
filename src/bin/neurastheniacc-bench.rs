@@ -37,6 +37,19 @@ enum Commands {
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
+    /// Compare model-assembled binaries against wat on fixed WAT fixtures exporting f.
+    Assembly {
+        #[command(flatten)]
+        model: ModelOptions,
+        #[arg(long, default_value = "fixtures/assembly")]
+        corpus: PathBuf,
+        #[arg(long)]
+        out_dir: PathBuf,
+        #[arg(long, default_value_t = 1000)]
+        cases: u32,
+        #[arg(long, default_value_t = 20261015)]
+        seed: u64,
+    },
     /// Measure first-attempt results across a corpus. No repair or fallback.
     Bench {
         #[command(flatten)]
@@ -59,6 +72,16 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
+        Commands::Assembly {
+            model,
+            corpus,
+            out_dir,
+            cases,
+            seed,
+        } => {
+            let compiler = model.load()?;
+            neurastheniacc::assembly_eval::bench(&compiler, corpus, out_dir, *cases, *seed)?;
+        }
         Commands::Run { wasm, export, x, y } => {
             println!(
                 "{}",

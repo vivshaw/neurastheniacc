@@ -45,6 +45,34 @@ JS
 
 `compile` generates and validates a Wasm module, writes the artifact, and reports `compiled`. Unsupported source is rejected before inference. The only output cleanup is removal of an optional single Markdown code fence.
 
+## Experimental model assembly
+
+The default assembler is still `wat`. To make the model produce the binary encoding too:
+
+```sh
+# Two fresh model contexts, one loaded model: C → WAT → hex bytes → Wasm.
+./target/release/neurastheniacc --offline compile examples/mix.c \
+  --assembler model -o runs/model-assembly/mix.wasm
+
+# Or give the model an existing WAT module directly.
+./target/release/neurastheniacc --offline assemble fixtures/assembly/01_add.wat \
+  --export f -o runs/model-assembly/add.wasm
+```
+
+The second stage uses the frozen `prompts/assembly-v1.txt` system prompt. The decoder accepts hexadecimal digits and ASCII whitespace only; it does not supply or repair any binary bytes. Validation requires the requested `(i32, i32) -> i32` export and the same execution restrictions as ordinary compilation. There is no conventional assembler fallback. `--prompt` overrides the C-to-WAT prompt only.
+
+Each attempt saves `.assembly.input.wat`, `.assembly.prompt.txt`, `.assembly.raw.txt`, and `.assembly.report.json`. Successfully decoded bytes are saved as `.candidate.wasm`, including invalid modules. Only validated candidates receive the requested `.wasm` filename. Compilation report schema 3 records the selected assembler and nests the second-stage report.
+
+Benchmark assembly independently of C translation:
+
+```sh
+cargo build --release --locked --bin neurastheniacc-bench
+./target/release/neurastheniacc-bench assembly --offline \
+  --out-dir runs/assembly-trial
+```
+
+This compares six frozen WAT fixtures against the `wat` reference assembler: arithmetic, signed LEB128, local declarations, branches, function/type indices, and multi-byte body/section lengths. All export `f`. It records byte equality separately from execution agreement on 324 edge pairs and 1,000 seeded random pairs. Reference binaries never enter model prompts. Results and failed candidates are retained; the benchmark exits nonzero when any case fails.
+
 ## Model and cache
 
 `--model high` is the default. Both presets download pinned weights on first use and verify their size and SHA-256 before caching them.
@@ -156,9 +184,11 @@ The tests require Clang but no model or network. They check front-end rejection,
 - `src/source.rs`: rejecting C front end; no code generation.
 - `src/model.rs`: cache, checksums, embedded inference and extraction.
 - `src/compile.rs`: compilation pipeline, artifacts and compilation reports.
+- `src/assembly.rs`: model-generated binary assembly and strict hex decoding.
+- `src/assembly_eval.rs`: WAT reference comparison, separate from compilation.
 - `src/wasm.rs`: Wasm validation and execution.
 - `src/eval.rs`: test harness, native Clang oracle, inputs and corpus generator.
-- `src/main.rs`: compiler CLI (`fetch`, `compile`).
+- `src/main.rs`: compiler CLI (`fetch`, `compile`, `assemble`).
 - `src/bin/neurastheniacc-bench.rs`: execution and evaluation CLI (`run`, `check`, `bench`).
 - `src/cli.rs`: shared model options; `src/lib.rs`: shared library entry point.
 - `prompts/`: versioned prompts.
