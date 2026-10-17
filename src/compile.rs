@@ -1,4 +1,5 @@
 use crate::{
+    artifact,
     model::{self, Compiler, Generation, Settings, StopReason},
     source,
     wasm::Wasm,
@@ -11,6 +12,9 @@ use std::{
     time::Instant,
 };
 
+// Bump when the compilation report format changes.
+const REPORT_SCHEMA_VERSION: u32 = 8;
+
 pub const MAX_ATTEMPTS: u32 = 5;
 pub const DEFAULT_ATTEMPTS: u32 = MAX_ATTEMPTS;
 
@@ -21,6 +25,7 @@ pub enum Status {
     GenerationError,
     TokenLimit,
     InvalidOutput,
+    InvalidWat,
     InvalidWasm,
 }
 
@@ -31,13 +36,14 @@ impl Status {
             Self::GenerationError => "generation_error",
             Self::TokenLimit => "token_limit",
             Self::InvalidOutput => "invalid_output",
+            Self::InvalidWat => "invalid_wat",
             Self::InvalidWasm => "invalid_wasm",
         }
     }
 
     fn retryable(self) -> bool {
         match self {
-            Self::InvalidOutput | Self::InvalidWasm | Self::TokenLimit => true,
+            Self::InvalidOutput | Self::InvalidWat | Self::InvalidWasm | Self::TokenLimit => true,
             Self::Compiled | Self::GenerationError => false,
         }
     }
@@ -79,7 +85,7 @@ struct Attempt {
     seconds: f64,
 }
 
-pub fn compile_with_options(
+pub fn compile(
     compiler: &Compiler,
     source: &source::Source,
     output: &Path,
@@ -106,7 +112,9 @@ pub fn compile_with_options(
         ))
         .tempdir_in(parent)?
         .keep();
-    for extension in ["wasm", "wat", "raw.txt"] {
+    // A failed recompile must not leave an older binary or report looking like its result.
+    // Previous invocations remain available in their unique attempt directories.
+    for extension in ["wasm", "wat", "raw.txt", "report.json"] {
         let path = output.with_extension(extension);
         if path.exists() {
             fs::remove_file(path)?;
@@ -122,10 +130,10 @@ pub fn compile_with_options(
     })?;
     let last = attempts.last().unwrap();
     if let Some(generation) = &last.generation {
-        fs::write(output.with_extension("raw.txt"), &generation.raw)?;
+        artifact::write(output.with_extension("raw.txt"), &generation.raw)?;
     }
     let mut report = Report {
-        schema_version: 7,
+        schema_version: REPORT_SCHEMA_VERSION,
         compiler_version: env!("CARGO_PKG_VERSION"),
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         model_sha256: compiler.model_sha256.clone(),
@@ -143,16 +151,16 @@ pub fn compile_with_options(
         attempts,
     };
     if let Some(path) = wat_path {
-        fs::copy(path, output.with_extension("wat"))?;
+        artifact::write(output.with_extension("wat"), fs::read(path)?)?;
     }
     if let Some(bytes) = bytes {
-        fs::write(output, &bytes)?;
+        artifact::write(output, &bytes)?;
         report.wasm_sha256 = Some(model::digest(&bytes));
     }
     report.compilation_seconds = start.elapsed().as_secs_f64();
     let json = serde_json::to_string_pretty(&report)?;
-    fs::write(output.with_extension("report.json"), &json)?;
-    fs::write(report.attempt_directory.join("report.json"), &json)?;
+    artifact::write(output.with_extension("report.json"), &json)?;
+    artifact::write(report.attempt_directory.join("report.json"), &json)?;
     eprintln!(
         "{}: {} ({} attempts, {:.2}s)",
         source.name,
@@ -166,7 +174,12 @@ pub fn compile_with_options(
 fn feedback(source: &str, attempt: &Attempt) -> String {
     format!(
         "The previous translation failed validation. Correct the WAT while preserving the original C semantics. Return the complete replacement module only.\n\nOriginal C:\n{source}\n\nPrevious response:\n{}\n\nValidation result ({}):\n{}\n",
-        attempt.generation.as_ref().map_or("", |g| g.raw.as_str()),
+        attempt
+            .generation
+            .as_ref()
+            .and_then(|g| g.final_text().ok())
+            .filter(|answer| !answer.trim().is_empty())
+            .unwrap_or("[No final answer was produced.]"),
         attempt.status,
         attempt.error.as_deref().unwrap_or("unknown error")
     )
@@ -213,7 +226,7 @@ fn wat_loop(
     for number in 1..=max_attempts {
         wat_path = None;
         let prefix = directory.join(format!("attempt-{number}"));
-        fs::write(prefix.with_extension("input.txt"), &input)?;
+        artifact::write(prefix.with_extension("input.txt"), &input)?;
         let start = Instant::now();
         let mut attempt = Attempt {
             number,
@@ -226,12 +239,12 @@ fn wat_loop(
         let result = (|| -> Result<Vec<u8>> {
             attempt.generation = Some(generate(&input)?);
             let generation = attempt.generation.as_ref().unwrap();
-            fs::write(prefix.with_extension("raw.txt"), &generation.raw)?;
+            artifact::write(prefix.with_extension("raw.txt"), &generation.raw)?;
             if let Some(reasoning) = &generation.reasoning {
-                fs::write(prefix.with_extension("reasoning.txt"), reasoning)?;
+                artifact::write(prefix.with_extension("reasoning.txt"), reasoning)?;
             }
             if let Some(answer) = &generation.answer {
-                fs::write(prefix.with_extension("answer.txt"), answer)?;
+                artifact::write(prefix.with_extension("answer.txt"), answer)?;
             }
             attempt.status = Status::TokenLimit;
             ensure!(
@@ -241,12 +254,13 @@ fn wat_loop(
             attempt.status = Status::InvalidOutput;
             let wat = extract_wat(generation.final_text()?)?;
             let path = prefix.with_extension("wat");
-            fs::write(&path, &wat)?;
+            artifact::write(&path, &wat)?;
             wat_path = Some(path);
+            attempt.status = Status::InvalidWat;
             let bytes = wat::parse_str(&wat).context("assembling generated WAT")?;
             attempt.status = Status::InvalidWasm;
             Wasm::new(&bytes, &source.name)?;
-            fs::write(prefix.with_extension("wasm"), &bytes)?;
+            artifact::write(prefix.with_extension("wasm"), &bytes)?;
             attempt.status = Status::Compiled;
             Ok(bytes)
         })();
@@ -254,7 +268,7 @@ fn wat_loop(
         if let Err(error) = &result {
             attempt.error = Some(format!("{error:#}"));
         }
-        fs::write(
+        artifact::write(
             prefix.with_extension("report.json"),
             serde_json::to_string_pretty(&attempt)?,
         )?;
@@ -337,11 +351,61 @@ mod tests {
             }
         })
         .unwrap();
+        assert_eq!(
+            attempts.iter().map(|a| a.status).collect::<Vec<_>>(),
+            [Status::InvalidWat, Status::InvalidWasm, Status::Compiled]
+        );
         assert_eq!(attempts.len(), 3);
         assert!(bytes.is_some());
         assert!(dir.path().join("attempt-1.raw.txt").exists());
         assert!(dir.path().join("attempt-3.wasm").exists());
     }
+    #[test]
+    fn thinking_retries_omit_reasoning_but_preserve_raw_history() {
+        for (answer, stop, expected) in [
+            (Some("(module"), StopReason::Eos, Status::InvalidWat),
+            (None, StopReason::TokenLimit, Status::TokenLimit),
+            (None, StopReason::Eos, Status::InvalidOutput),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut calls = 0;
+            let raw = format!(
+                "PRIVATE_REASONING{}",
+                answer.map_or(String::new(), |a| format!("</think>{a}"))
+            );
+            let result = wat_loop(&source(), 2, dir.path(), |input| {
+                calls += 1;
+                if calls == 1 {
+                    let mut output = generation(&raw);
+                    output.reasoning = Some("PRIVATE_REASONING".into());
+                    output.answer = answer.map(str::to_owned);
+                    output.stop = stop;
+                    Ok(output)
+                } else {
+                    assert!(!input.contains("PRIVATE_REASONING"));
+                    let previous = input
+                        .split_once("Previous response:\n")
+                        .unwrap()
+                        .1
+                        .split_once("\n\nValidation result")
+                        .unwrap()
+                        .0;
+                    assert!(!previous.contains("</think>"));
+                    assert!(input.contains(answer.unwrap_or("[No final answer was produced.]")));
+                    assert!(input.contains(expected.as_str()));
+                    Ok(generation(VALID))
+                }
+            })
+            .unwrap();
+            assert_eq!(result.attempts[0].status, expected);
+            assert_eq!(result.attempts[1].status, Status::Compiled);
+            assert_eq!(
+                fs::read_to_string(dir.path().join("attempt-1.raw.txt")).unwrap(),
+                raw
+            );
+        }
+    }
+
     #[test]
     fn respects_attempt_limit_and_does_not_retry_infrastructure_errors() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,12 +1,15 @@
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
-use neurastheniacc::{cli::ModelOptions, compile, eval, source, wasm};
+use neurastheniacc::{artifact, cli::ModelOptions, compile, eval, source, wasm};
 use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+
+// Bump when the benchmark summary format changes.
+const SUMMARY_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Parser)]
 #[command(
@@ -158,10 +161,9 @@ fn main() -> Result<()> {
             for (name, source) in sources {
                 fs::write(output.join(format!("{name}.c")), &source.canonical)?;
                 let artifact = output.join(format!("{name}.wasm"));
-                let compilation =
-                    compile::compile_with_options(&compiler, &source, &artifact, *attempts)?;
+                let compilation = compile::compile(&compiler, &source, &artifact, *attempts)?;
                 let report = eval::evaluate(compilation, &source, &artifact, *cases, *seed);
-                fs::write(
+                artifact::write(
                     artifact.with_extension("check.json"),
                     serde_json::to_string_pretty(&report)?,
                 )?;
@@ -175,14 +177,14 @@ fn main() -> Result<()> {
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
             let summary = serde_json::json!({
-                "schema_version": 4, "max_attempts": attempts, "programs": reports.len(), "counts": counts,
+                "schema_version": SUMMARY_SCHEMA_VERSION, "max_attempts": attempts, "programs": reports.len(), "counts": counts,
                 "seed": seed, "random_inputs_per_program": cases,
                 "edge_inputs_per_program": eval::inputs(0, *seed).len(),
                 "benchmark_seconds_excluding_model_load": start.elapsed().as_secs_f64(),
                 "clang_version": clang_version,
                 "reports": reports,
             });
-            fs::write(
+            artifact::write(
                 output.join("summary.json"),
                 serde_json::to_string_pretty(&summary)?,
             )?;
@@ -193,7 +195,8 @@ fn main() -> Result<()> {
                 output.display()
             );
             ensure!(
-                counts.get("passed").copied().unwrap_or(0) == reports.len(),
+                reports.iter().all(|report| report.status
+                    == eval::EvaluationStatus::Check(eval::CheckStatus::Passed)),
                 "benchmark recorded failures (see summary.json)"
             );
         }

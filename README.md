@@ -49,9 +49,9 @@ JS
 ./target/release/neurastheniacc compile examples/mix.c --attempts 5 -o runs/repair/mix.wasm
 ```
 
-This loop belongs to the compiler. It uses syntax, Wasm type/structure validation, and export checks; it does not use Clang results or semantic counterexamples. A valid but incorrect translation stops the loop too. Each retry has a fresh inference context with the same system prompt, source, token budget, and decoding settings; it receives only the most recent candidate and diagnostic, avoiding unbounded history growth. Token-limit failures can be retried; inference/context errors stop immediately.
+This loop belongs to the compiler. It uses syntax, Wasm type/structure validation, and export checks; it does not use Clang results or semantic counterexamples. A valid but incorrect translation stops the loop too. Each retry has a fresh inference context with the same system prompt, source, token budget, and decoding settings; it receives only the most recent final answer and diagnostic, omitting reasoning traces; if no final answer was produced, feedback explicitly says so. Earlier attempts are not replayed. Token-limit failures can be retried; inference/context errors stop immediately.
 
-All attempts are retained in a unique directory beside the output (`mix.attempts-…/`), with exact inputs, responses, extracted WAT, diagnostics, and validated binaries. The final report lists that directory and every attempt. The requested `.wasm` is written only after success. Unsupported source is rejected before inference; the only text cleanup is removal of an optional single Markdown code fence.
+All attempts are retained in a unique directory beside the output (`mix.attempts-…/`), with exact inputs, responses, extracted WAT, diagnostics, and validated binaries. The final report lists that directory and every attempt. The requested `.wasm` is written only after success. Artifacts are published through temporary files and atomic renames, so readers do not see partial writes. Each file is published independently; the artifact set is not a single transaction. Unsupported source is rejected before inference; the only text cleanup is removal of an optional single Markdown code fence.
 
 ## Model and cache
 
@@ -145,13 +145,13 @@ Outputs include:
 - `.raw.txt`: unmodified final model response; earlier responses live in the attempt directory.
 - `.wat`: extracted candidate, even if assembly fails.
 - `.wasm`: valid candidate, including candidates that fail differential checking.
-- `.report.json`: compilation result (schema 7), every attempt and feedback input, source/model/output hashes, inference settings, token counts, stop reasons and total timing.
+- `.report.json`: compilation result (schema 8), every attempt and feedback input, source/model/output hashes, inference settings, token counts, stop reasons and total timing.
 - `.check.json`: benchmark evaluation result and counterexample, with the compilation report nested separately.
 - `summary.json`: all benchmark reports, aggregate outcomes and Clang version.
 
 Compilation reports store generations once, in `attempts[].generation`; the final response is in the last attempt. Settings record one `chat_mode`: `model_template`, `qwen_no_thinking`, or `qwen_thinking`.
 
-A benchmark exits nonzero if any program fails, **after** saving its results. Compilation reports distinguish generation errors, truncation, malformed output, invalid Wasm and successful compilation. Harness reports separately record check errors, runtime errors, mismatches and passed tests. Source and model-loading errors stop before the benchmark can run.
+A benchmark exits nonzero if any program fails, **after** saving its results. Compilation reports distinguish generation errors, truncation, malformed output (`invalid_output`), WAT parsing errors (`invalid_wat`), invalid Wasm and successful compilation. Harness reports separately record check errors, runtime errors, mismatches and passed tests. Source and model-loading errors stop before the benchmark can run.
 
 Compilation time includes inference context creation, prompt processing, generation, assembly and module validation. Weight loading is reported separately; downloading and hashing are outside the compilation measurement. Wasm execution time includes fresh instance creation. The Clang reference timing includes compiling and running the oracle. These are not apples-to-apples code-performance benchmarks.
 

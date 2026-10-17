@@ -286,6 +286,7 @@ mod tests {
             Status::GenerationError,
             Status::TokenLimit,
             Status::InvalidOutput,
+            Status::InvalidWat,
             Status::InvalidWasm,
         ] {
             let expected = serde_json::json!(status.as_str());
