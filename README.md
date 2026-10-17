@@ -12,6 +12,29 @@ The first implementation uses Rust, statically linked llama.cpp through `llama-c
 
 ## Try it
 
+With Nix (flakes enabled), enter the pinned development environment:
+
+```sh
+nix develop
+cargo build --release --locked --bins
+```
+
+The shell provides Rust, Cargo, rustfmt, Clippy, rust-analyzer, Clang/libclang, CMake, and Wasmtime. It targets Apple Silicon macOS and ARM64/x86-64 Linux. Metal remains enabled on macOS; Linux uses CPU inference. No separate model server or system Rust installation is needed.
+
+To build and run directly through Nix:
+
+```sh
+nix build                         # both binaries in result/bin/
+nix run . -- --help               # compiler
+nix run .#bench -- --help         # benchmark tool
+nix flake check                  # build and run the tests; no model needed
+nix fmt flake.nix                # format the flake
+```
+
+Run benchmark commands inside `nix develop` so Clang is available for the reference compiler. Nix pins build dependencies in `flake.lock` and Rust crates in `Cargo.lock`; model weights are downloaded separately on first use and stay in the normal user cache. Build inputs exclude `runs/`, `benchmarks/`, and cached weights.
+
+Without Nix:
+
 Build requirements: Rust with Cargo, CMake, and a C/C++ toolchain with libclang available for bindgen. On macOS, install Xcode Command Line Tools and CMake. On Debian/Ubuntu, the corresponding packages include `build-essential cmake clang libclang-dev`. Tested here with Rust 1.95 on macOS ARM64. Metal is compiled in on macOS; other platforms use CPU inference by default.
 
 Install [Wasmtime](https://docs.wasmtime.dev/cli-install.html) to run the generated module.

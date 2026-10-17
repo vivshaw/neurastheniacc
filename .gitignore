@@ -11,3 +11,7 @@
 *.check.json
 
 *.attempts-*/
+
+/result
+/result-*
+/.direnv/
