@@ -81,7 +81,7 @@ fn main() -> Result<()> {
             seed,
         } => {
             let source = source::read(source)?;
-            let wasm = wasm::Wasm::new(&fs::read(wasm)?, &source.name)?;
+            let wasm = wasm::Wasm::new(&fs::read(wasm)?, source.name())?;
             let report = eval::compare(&source, &wasm, *cases, *seed)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             ensure!(
@@ -145,8 +145,8 @@ fn main() -> Result<()> {
                 fs::create_dir_all(parent)?;
             }
             fs::create_dir(&output).context("benchmark output must be a new directory")?;
-            let compiler = match model.load_with_prompt(prompt.clone()) {
-                Ok(compiler) => compiler,
+            let generator = match model.load_with_prompt(prompt.clone()) {
+                Ok(generator) => generator,
                 Err(error) => {
                     // Only remove our empty reservation, never contents from another process.
                     let _ = fs::remove_dir(&output);
@@ -159,15 +159,15 @@ fn main() -> Result<()> {
             let mut reports = Vec::new();
             let start = Instant::now();
             for (name, source) in sources {
-                fs::write(output.join(format!("{name}.c")), &source.canonical)?;
+                fs::write(output.join(format!("{name}.c")), source.canonical())?;
                 let artifact = output.join(format!("{name}.wasm"));
-                let compilation = compile::compile(&compiler, &source, &artifact, *attempts)?;
-                let report = eval::evaluate(compilation, &source, &artifact, *cases, *seed);
+                let compilation = compile::compile(&generator, &source, &artifact, *attempts)?;
+                let report = eval::evaluate(compilation, &source, *cases, *seed);
                 artifact::write(
                     artifact.with_extension("check.json"),
                     serde_json::to_string_pretty(&report)?,
                 )?;
-                eprintln!("{}: {}", source.name, report.status);
+                eprintln!("{}: {}", source.name(), report.status);
                 *counts.entry(report.status.to_string()).or_default() += 1;
                 reports.push(report);
             }

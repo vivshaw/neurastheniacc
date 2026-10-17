@@ -1,6 +1,6 @@
 use crate::{
     artifact,
-    model::{self, Compiler, Generation, Settings, StopReason},
+    model::{self, Generation, Generator, Settings, StopReason},
     source,
     wasm::Wasm,
 };
@@ -85,12 +85,70 @@ struct Attempt {
     seconds: f64,
 }
 
+/// Every path derived from the output; construction lives here so callers cannot disagree.
+pub struct Artifacts {
+    pub wasm: PathBuf,
+    pub wat: PathBuf,
+    pub raw: PathBuf,
+    pub report: PathBuf,
+}
+
+impl Artifacts {
+    pub fn new(output: &Path) -> Self {
+        Self {
+            wasm: output.with_extension("wasm"),
+            wat: output.with_extension("wat"),
+            raw: output.with_extension("raw.txt"),
+            report: output.with_extension("report.json"),
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Path> {
+        [&self.wasm, &self.wat, &self.raw, &self.report]
+            .into_iter()
+            .map(PathBuf::as_path)
+    }
+}
+
+/// Resolve the deepest existing ancestor so paths that do not exist yet still compare by identity.
+fn resolve(path: &Path) -> PathBuf {
+    if let Ok(resolved) = fs::canonicalize(path) {
+        return resolved;
+    }
+    match path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(parent) => resolve(parent).join(path.file_name().unwrap_or_default()),
+        None => path.to_path_buf(),
+    }
+}
+
+/// Compilation replaces every sibling artifact, so none of them may be the source itself.
+pub fn ensure_artifacts_do_not_clobber(source: &Path, output: &Path) -> Result<()> {
+    let source = resolve(source);
+    for artifact in Artifacts::new(output).iter() {
+        ensure!(
+            resolve(artifact) != source,
+            "compiling to {} would overwrite the source {}",
+            artifact.display(),
+            source.display()
+        );
+    }
+    Ok(())
+}
+
+/// A compilation report paired with the validated module it describes, so evaluation
+/// cannot pair a report with unrelated bytes read back from disk.
+pub struct Compilation {
+    pub report: Report,
+    /// Validated module bytes; present only when `report.status` is `Compiled`.
+    pub output: Option<Vec<u8>>,
+}
+
 pub fn compile(
-    compiler: &Compiler,
+    compiler: &Generator,
     source: &source::Source,
     output: &Path,
     max_attempts: u32,
-) -> Result<Report> {
+) -> Result<Compilation> {
     ensure!(
         (1..=MAX_ATTEMPTS).contains(&max_attempts),
         "attempts must be between 1 and {MAX_ATTEMPTS}"
@@ -99,6 +157,7 @@ pub fn compile(
         output.extension().is_some_and(|ext| ext == "wasm"),
         "output must have a .wasm extension"
     );
+    let artifacts = Artifacts::new(output);
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -114,10 +173,9 @@ pub fn compile(
         .keep();
     // A failed recompile must not leave an older binary or report looking like its result.
     // Previous invocations remain available in their unique attempt directories.
-    for extension in ["wasm", "wat", "raw.txt", "report.json"] {
-        let path = output.with_extension(extension);
-        if path.exists() {
-            fs::remove_file(path)?;
+    for artifact in artifacts.iter() {
+        if artifact.exists() {
+            fs::remove_file(artifact)?;
         }
     }
     let start = Instant::now();
@@ -130,18 +188,18 @@ pub fn compile(
     })?;
     let last = attempts.last().unwrap();
     if let Some(generation) = &last.generation {
-        artifact::write(output.with_extension("raw.txt"), &generation.raw)?;
+        artifact::write(&artifacts.raw, &generation.raw)?;
     }
     let mut report = Report {
         schema_version: REPORT_SCHEMA_VERSION,
         compiler_version: env!("CARGO_PKG_VERSION"),
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
-        model_sha256: compiler.model_sha256.clone(),
-        source_sha256: model::digest(source.canonical.as_bytes()),
-        source: source.canonical.clone(),
-        export: source.name.clone(),
-        settings: compiler.settings.clone(),
-        model_load_seconds: compiler.load_seconds,
+        model_sha256: compiler.model_sha256().to_owned(),
+        source_sha256: model::digest(source.canonical().as_bytes()),
+        source: source.canonical().to_owned(),
+        export: source.name().to_owned(),
+        settings: compiler.settings().clone(),
+        model_load_seconds: compiler.load_seconds(),
         compilation_seconds: 0.0,
         status: last.status,
         error: last.error.clone(),
@@ -151,24 +209,27 @@ pub fn compile(
         attempts,
     };
     if let Some(path) = wat_path {
-        artifact::write(output.with_extension("wat"), fs::read(path)?)?;
+        artifact::write(&artifacts.wat, fs::read(path)?)?;
     }
-    if let Some(bytes) = bytes {
-        artifact::write(output, &bytes)?;
-        report.wasm_sha256 = Some(model::digest(&bytes));
+    if let Some(bytes) = &bytes {
+        artifact::write(&artifacts.wasm, bytes)?;
+        report.wasm_sha256 = Some(model::digest(bytes));
     }
     report.compilation_seconds = start.elapsed().as_secs_f64();
     let json = serde_json::to_string_pretty(&report)?;
-    artifact::write(output.with_extension("report.json"), &json)?;
+    artifact::write(&artifacts.report, &json)?;
     artifact::write(report.attempt_directory.join("report.json"), &json)?;
     eprintln!(
         "{}: {} ({} attempts, {:.2}s)",
-        source.name,
+        source.name(),
         report.status,
         report.attempts.len(),
         report.compilation_seconds
     );
-    Ok(report)
+    Ok(Compilation {
+        report,
+        output: bytes,
+    })
 }
 
 fn feedback(source: &str, attempt: &Attempt) -> String {
@@ -213,6 +274,92 @@ struct LoopOutput {
     wat_path: Option<PathBuf>,
 }
 
+/// One attempt's generation and model-behavior verdict, before any persistence.
+struct AttemptOutput {
+    generation: Option<Generation>,
+    wat: Option<String>,
+    outcome: Outcome,
+}
+
+/// Generate and validate one module. Every failure here is model behavior and becomes a
+/// status; this function performs no I/O, so artifact failures cannot masquerade as verdicts.
+fn produce_attempt(
+    source: &source::Source,
+    input: &str,
+    generate: &mut impl FnMut(&str) -> Result<Generation>,
+) -> AttemptOutput {
+    let generation = match generate(input) {
+        Ok(generation) => generation,
+        Err(error) => {
+            return AttemptOutput {
+                generation: None,
+                wat: None,
+                outcome: Outcome::rejected(Status::GenerationError, error),
+            };
+        }
+    };
+    if generation.stop != StopReason::Eos {
+        return AttemptOutput {
+            generation: Some(generation),
+            wat: None,
+            outcome: Outcome::rejected(
+                Status::TokenLimit,
+                anyhow::anyhow!(
+                    "response reached its output token limit; return a complete, concise WAT module within the same budget"
+                ),
+            ),
+        };
+    }
+    let wat = match generation.final_text().and_then(extract_wat) {
+        Ok(wat) => wat,
+        Err(error) => {
+            return AttemptOutput {
+                generation: Some(generation),
+                wat: None,
+                outcome: Outcome::rejected(Status::InvalidOutput, error),
+            };
+        }
+    };
+    let bytes = match wat::parse_str(&wat).context("assembling generated WAT") {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return AttemptOutput {
+                generation: Some(generation),
+                wat: Some(wat),
+                outcome: Outcome::rejected(Status::InvalidWat, error),
+            };
+        }
+    };
+    if let Err(error) = Wasm::new(&bytes, source.name()) {
+        return AttemptOutput {
+            generation: Some(generation),
+            wat: Some(wat),
+            outcome: Outcome::rejected(Status::InvalidWasm, error),
+        };
+    }
+    AttemptOutput {
+        generation: Some(generation),
+        wat: Some(wat),
+        outcome: Outcome::Compiled(bytes),
+    }
+}
+
+/// A model-behavior verdict: success or a retryable validation failure.
+/// Artifact I/O failures are not verdicts; they propagate as errors and abort compilation.
+enum Outcome {
+    Compiled(Vec<u8>),
+    Rejected { status: Status, error: String },
+}
+
+impl Outcome {
+    fn rejected(status: Status, error: anyhow::Error) -> Self {
+        Self::Rejected {
+            status,
+            error: format!("{error:#}"),
+        }
+    }
+}
+
 // Keeping generation injectable lets tests exercise the actual compiler loop without a model.
 fn wat_loop(
     source: &source::Source,
@@ -222,23 +369,14 @@ fn wat_loop(
 ) -> Result<LoopOutput> {
     let mut attempts = Vec::new();
     let mut wat_path = None;
-    let mut input = source.canonical.clone();
+    let mut input = source.canonical().to_owned();
     for number in 1..=max_attempts {
-        wat_path = None;
         let prefix = directory.join(format!("attempt-{number}"));
         artifact::write(prefix.with_extension("input.txt"), &input)?;
         let start = Instant::now();
-        let mut attempt = Attempt {
-            number,
-            input: input.clone(),
-            status: Status::GenerationError,
-            error: None,
-            generation: None,
-            seconds: 0.0,
-        };
-        let result = (|| -> Result<Vec<u8>> {
-            attempt.generation = Some(generate(&input)?);
-            let generation = attempt.generation.as_ref().unwrap();
+        let output = produce_attempt(source, &input, &mut generate);
+        // Persist everything the attempt produced; I/O failures abort compilation.
+        if let Some(generation) = &output.generation {
             artifact::write(prefix.with_extension("raw.txt"), &generation.raw)?;
             if let Some(reasoning) = &generation.reasoning {
                 artifact::write(prefix.with_extension("reasoning.txt"), reasoning)?;
@@ -246,39 +384,42 @@ fn wat_loop(
             if let Some(answer) = &generation.answer {
                 artifact::write(prefix.with_extension("answer.txt"), answer)?;
             }
-            attempt.status = Status::TokenLimit;
-            ensure!(
-                generation.stop == StopReason::Eos,
-                "response reached its output token limit; return a complete, concise WAT module within the same budget"
-            );
-            attempt.status = Status::InvalidOutput;
-            let wat = extract_wat(generation.final_text()?)?;
-            let path = prefix.with_extension("wat");
-            artifact::write(&path, &wat)?;
-            wat_path = Some(path);
-            attempt.status = Status::InvalidWat;
-            let bytes = wat::parse_str(&wat).context("assembling generated WAT")?;
-            attempt.status = Status::InvalidWasm;
-            Wasm::new(&bytes, &source.name)?;
-            artifact::write(prefix.with_extension("wasm"), &bytes)?;
-            attempt.status = Status::Compiled;
-            Ok(bytes)
-        })();
-        attempt.seconds = start.elapsed().as_secs_f64();
-        if let Err(error) = &result {
-            attempt.error = Some(format!("{error:#}"));
         }
+        wat_path = match &output.wat {
+            Some(wat) => {
+                let path = prefix.with_extension("wat");
+                artifact::write(&path, wat)?;
+                Some(path)
+            }
+            None => None,
+        };
+        let (status, error, bytes) = match output.outcome {
+            Outcome::Compiled(bytes) => {
+                artifact::write(prefix.with_extension("wasm"), &bytes)?;
+                (Status::Compiled, None, Some(bytes))
+            }
+            Outcome::Rejected { status, error } => (status, Some(error), None),
+        };
+        let attempt = Attempt {
+            number,
+            input: input.clone(),
+            status,
+            error,
+            generation: output.generation,
+            seconds: start.elapsed().as_secs_f64(),
+        };
         artifact::write(
             prefix.with_extension("report.json"),
             serde_json::to_string_pretty(&attempt)?,
         )?;
         eprintln!(
             "{}: attempt {number}/{max_attempts}: {}",
-            source.name, attempt.status
+            source.name(),
+            attempt.status
         );
         let retry = attempt.status.retryable();
         attempts.push(attempt);
-        if let Ok(bytes) = result {
+        if let Some(bytes) = bytes {
             return Ok(LoopOutput {
                 attempts,
                 bytes: Some(bytes),
@@ -288,7 +429,7 @@ fn wat_loop(
         if !retry || number == max_attempts {
             break;
         }
-        input = feedback(&source.canonical, attempts.last().unwrap());
+        input = feedback(source.canonical(), attempts.last().unwrap());
     }
     Ok(LoopOutput {
         attempts,
@@ -300,15 +441,37 @@ fn wat_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_guard_protects_every_sibling_not_just_the_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("example.wat");
+        fs::write(&source, "(module)").unwrap();
+        // The .wat artifact of the default output name is the source itself.
+        assert!(
+            ensure_artifacts_do_not_clobber(&source, &dir.path().join("example.wasm")).is_err()
+        );
+        let binary = dir.path().join("plain.wasm");
+        fs::write(&binary, b"").unwrap();
+        assert!(ensure_artifacts_do_not_clobber(&binary, &binary).is_err());
+        let other = dir.path().join("other.wasm");
+        assert!(ensure_artifacts_do_not_clobber(&source, &other).is_ok());
+        // Parents that do not exist yet still resolve far enough to compare identities.
+        let nested = dir.path().join("nested").join("a.wasm");
+        assert!(ensure_artifacts_do_not_clobber(&source, &nested).is_ok());
+    }
+
     #[test]
     fn extraction_never_repairs_model_output() {
         assert_eq!(extract_wat("```wat\n(module)\n```").unwrap(), "(module)");
         assert!(extract_wat("Here is your code: (module)").is_err());
         assert!(wat::parse_str(extract_wat("(module)\nSome explanation").unwrap()).is_err());
     }
+
     fn source() -> source::Source {
         source::parse("uint32_t f(uint32_t x, uint32_t y) { return x + y; }").unwrap()
     }
+
     fn generation(raw: &str) -> Generation {
         Generation {
             raw: raw.into(),
@@ -320,7 +483,9 @@ mod tests {
             stop: StopReason::Eos,
         }
     }
+
     const VALID: &str = "(module (func (export \"f\") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add))";
+
     #[test]
     fn feeds_syntax_and_validation_errors_back_and_stops_on_success() {
         let dir = tempfile::tempdir().unwrap();
@@ -332,12 +497,12 @@ mod tests {
             calls += 1;
             match calls {
                 1 => {
-                    assert_eq!(input, src.canonical);
+                    assert_eq!(input, src.canonical());
                     Ok(generation("(module"))
                 }
                 2 => {
                     assert!(input.contains("assembling generated WAT"));
-                    assert!(input.contains(&src.canonical));
+                    assert!(input.contains(src.canonical()));
                     Ok(generation(
                         "(module (func (export \"f\") (param i32 i32) (result i32) local.get 9))",
                     ))
@@ -360,6 +525,7 @@ mod tests {
         assert!(dir.path().join("attempt-1.raw.txt").exists());
         assert!(dir.path().join("attempt-3.wasm").exists());
     }
+
     #[test]
     fn thinking_retries_omit_reasoning_but_preserve_raw_history() {
         for (answer, stop, expected) in [
@@ -445,6 +611,7 @@ mod tests {
             VALID
         );
     }
+
     #[test]
     fn valid_but_wrong_program_stops_without_semantic_feedback() {
         let dir = tempfile::tempdir().unwrap();

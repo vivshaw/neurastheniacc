@@ -1,7 +1,7 @@
 use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
 use neurastheniacc::{cli::ModelOptions, compile, source};
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -46,21 +46,20 @@ fn main() -> Result<()> {
             let output = output
                 .clone()
                 .unwrap_or_else(|| source.with_extension("wasm"));
-            // canonicalize requires an existing path; compare identities only then.
-            if output.exists() {
-                ensure!(
-                    fs::canonicalize(source)? != fs::canonicalize(&output)?,
-                    "output must not overwrite source"
-                );
-            }
-            let compiler = cli.model.load()?;
-            let report = compile::compile(&compiler, &parsed, &output, *attempts)?;
+            // Compilation replaces every sibling artifact, so guard before loading a model.
+            compile::ensure_artifacts_do_not_clobber(source, &output)?;
             ensure!(
-                report.status == compile::Status::Compiled,
-                "compilation failed; see {}",
-                output.with_extension("report.json").display()
+                output.extension().is_some_and(|ext| ext == "wasm"),
+                "output must have a .wasm extension"
             );
-            println!("Wrote {} ({})", output.display(), report.status);
+            let compiler = cli.model.load()?;
+            let compilation = compile::compile(&compiler, &parsed, &output, *attempts)?;
+            ensure!(
+                compilation.report.status == compile::Status::Compiled,
+                "compilation failed; see {}",
+                compile::Artifacts::new(&output).report.display()
+            );
+            println!("Wrote {} ({})", output.display(), compilation.report.status);
         }
     }
     Ok(())

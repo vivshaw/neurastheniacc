@@ -61,8 +61,17 @@ pub fn reference(source: &Source, cases: &[[u32; 2]]) -> Result<Vec<u32>> {
     let exe = dir.path().join("reference");
     // Separate translation units keep stdio macros and harness identifiers out of the source.
     // There are no calls in the supported subset, so renaming only the function is sufficient.
+    // A typedef, not <stdint.h>, provides uint32_t: header macros such as UINT32_MAX must not
+    // collide with identifiers the front end accepted.
     let subject = source.renamed("neurastheniacc_subject")?;
-    fs::write(&subject_path, format!("#include <stdint.h>\n{subject}\n"))?;
+    fs::write(
+        &subject_path,
+        format!(
+            "typedef unsigned int uint32_t;\n\
+             _Static_assert(sizeof(uint32_t) == 4, \"requires 32-bit unsigned int\");\n\
+             {subject}\n"
+        ),
+    )?;
     let driver = r#"#include <stdint.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -77,8 +86,9 @@ int main(void) {
 }
 "#;
     fs::write(&c_path, driver)?;
+    // Only the front end restricts the language; Clang warnings must not reject supported code.
     let result = Command::new("clang")
-        .args(["-std=c11", "-O2", "-Werror", "-Wall"])
+        .args(["-std=c11", "-O2"])
         .arg(&c_path)
         .arg(&subject_path)
         .arg("-o")
@@ -244,15 +254,15 @@ pub struct Evaluation {
 }
 
 pub fn evaluate(
-    compilation: crate::compile::Report,
+    compilation: crate::compile::Compilation,
     source: &Source,
-    artifact: &std::path::Path,
     cases: u32,
     seed: u64,
 ) -> Evaluation {
+    let crate::compile::Compilation { report, output } = compilation;
     let mut result = Evaluation {
-        status: EvaluationStatus::Compilation(compilation.status),
-        compilation,
+        status: EvaluationStatus::Compilation(report.status),
+        compilation: report,
         check: None,
         error: None,
     };
@@ -260,7 +270,8 @@ pub fn evaluate(
         return result;
     }
     match (|| -> Result<Check> {
-        let wasm = Wasm::new(&fs::read(artifact)?, &source.name)?;
+        let bytes = output.context("compiled report without module bytes")?;
+        let wasm = Wasm::new(&bytes, source.name())?;
         compare(source, &wasm, cases, seed)
     })() {
         Ok(check) => {
@@ -354,6 +365,22 @@ mod tests {
             crate::source::parse("uint32_t ncc_x(uint32_t EOF, uint32_t y) { return EOF + y; }")
                 .unwrap();
         assert_eq!(reference(&source, &[[3, 5]]).unwrap(), vec![8]);
+    }
+    #[test]
+    fn oracle_tolerates_identifiers_that_stdint_macros_would_clobber() {
+        for name in ["UINT32_MAX", "UINT32_C", "INT32_MIN"] {
+            let text = format!("uint32_t f(uint32_t {name}, uint32_t y) {{ return {name} + y; }}");
+            let source = crate::source::parse(&text).unwrap();
+            assert_eq!(reference(&source, &[[3, 5]]).unwrap(), vec![8]);
+        }
+    }
+    #[test]
+    fn oracle_tolerates_code_the_front_end_accepts() {
+        let source = crate::source::parse(
+            "uint32_t f(uint32_t x, uint32_t y) { uint32_t unused = x; return y; }",
+        )
+        .unwrap();
+        assert_eq!(reference(&source, &[[3, 5]]).unwrap(), vec![5]);
     }
     #[test]
     fn generated_c_is_supported_and_compiles() {

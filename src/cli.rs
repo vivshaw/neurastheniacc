@@ -1,4 +1,4 @@
-use crate::model::{self, ChatMode, Compiler, Settings};
+use crate::model::{self, ChatMode, Generator, Settings};
 use anyhow::Result;
 use clap::Args;
 use std::path::PathBuf;
@@ -31,25 +31,23 @@ pub struct ModelOptions {
 }
 
 impl ModelOptions {
-    pub fn load(&self) -> Result<Compiler> {
+    pub fn load(&self) -> Result<Generator> {
         self.load_with_prompt(model::DEFAULT_PROMPT.into())
     }
 
-    pub fn load_with_prompt(&self, prompt: String) -> Result<Compiler> {
+    pub fn load_with_prompt(&self, prompt: String) -> Result<Generator> {
+        let settings = Settings {
+            context: self.context,
+            max_tokens: self.max_tokens,
+            threads: self.threads,
+            gpu_layers: self.gpu_layers,
+            chat_mode: self.chat_mode(),
+        };
+        // Invalid settings must fail before resolution downloads or hashes a model.
+        settings.validate()?;
         let (path, sha) = self.resolve()?;
         eprintln!("Loading {} (in-process)…", path.display());
-        Compiler::load(
-            &path,
-            sha,
-            Settings {
-                context: self.context,
-                max_tokens: self.max_tokens,
-                threads: self.threads,
-                gpu_layers: self.gpu_layers,
-                chat_mode: self.chat_mode(),
-            },
-            prompt,
-        )
+        Generator::load(&path, sha, settings, prompt)
     }
 
     fn chat_mode(&self) -> ChatMode {
@@ -104,5 +102,27 @@ mod tests {
             );
         }
         assert!(Cli::try_parse_from(["test", "--qwen-thinking", "--qwen-no-thinking"]).is_err());
+    }
+
+    #[test]
+    fn invalid_settings_fail_before_model_resolution() {
+        for (args, message) in [
+            (vec!["test", "--context", "100"], "context"),
+            (vec!["test", "--threads", "0"], "threads"),
+            (
+                vec!["test", "--context", "512", "--max-tokens", "512"],
+                "max-tokens",
+            ),
+        ] {
+            let result = Cli::try_parse_from(args).unwrap().model.load();
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("invalid settings unexpectedly loaded a model"),
+            };
+            assert!(
+                format!("{error:#}").contains(message),
+                "{error:#} should mention {message}"
+            );
+        }
     }
 }

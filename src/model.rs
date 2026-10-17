@@ -166,6 +166,22 @@ pub struct Settings {
     pub chat_mode: ChatMode,
 }
 
+impl Settings {
+    /// Callers validate before resolving a model so invalid flags cannot trigger a download.
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.context >= 512 && self.context <= 32768,
+            "context must be between 512 and 32768"
+        );
+        ensure!(
+            self.max_tokens > 0 && self.max_tokens < self.context,
+            "max-tokens must be positive and smaller than context"
+        );
+        ensure!(self.threads > 0, "threads must be positive");
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
@@ -198,31 +214,37 @@ impl Generation {
     }
 }
 
-pub struct Compiler {
+/// Generates WAT text from C; compilation itself belongs to `crate::compile`.
+/// The settings were validated and used during loading, so they are read-only afterwards.
+pub struct Generator {
     model: LlamaModel,
     backend: LlamaBackend,
-    pub settings: Settings,
-    pub model_sha256: String,
-    pub load_seconds: f64,
+    settings: Settings,
+    model_sha256: String,
+    load_seconds: f64,
     prompt: String,
 }
 
-impl Compiler {
+impl Generator {
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub fn model_sha256(&self) -> &str {
+        &self.model_sha256
+    }
+
+    pub fn load_seconds(&self) -> f64 {
+        self.load_seconds
+    }
+
     pub fn load(
         path: &Path,
         model_sha256: String,
         settings: Settings,
         prompt: String,
     ) -> Result<Self> {
-        ensure!(
-            settings.context >= 512 && settings.context <= 32768,
-            "context must be between 512 and 32768"
-        );
-        ensure!(
-            settings.max_tokens > 0 && settings.max_tokens < settings.context,
-            "max-tokens must be positive and smaller than context"
-        );
-        ensure!(settings.threads > 0, "threads must be positive");
+        settings.validate()?;
         llama_cpp_2::send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
         let start = Instant::now();
         let backend = LlamaBackend::init()?;

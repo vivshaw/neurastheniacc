@@ -6,19 +6,24 @@ use anyhow::{Context, Result, bail, ensure};
 use std::collections::HashSet;
 
 #[derive(Debug)]
+/// Constructed only by `parse`, so `name` always agrees with the declaration in `canonical`.
 pub struct Source {
-    pub name: String,
-    pub canonical: String,
+    name: String,
+    canonical: String,
 }
 
 impl Source {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn canonical(&self) -> &str {
+        &self.canonical
+    }
+
     /// Rename only the function declaration; calls are excluded by this subset.
     pub fn renamed(&self, new_name: &str) -> Result<String> {
         let mut tokens = lex(&self.canonical)?;
-        ensure!(
-            tokens.get(1) == Some(&self.name),
-            "source name disagrees with declaration"
-        );
         tokens[1] = new_name.into();
         // Re-parse to reject invalid replacement identifiers and keep formatting local.
         let renamed = parse(&tokens.join(" "))?;
@@ -329,17 +334,12 @@ pub fn read(path: &std::path::Path) -> Result<Source> {
 mod tests {
     #[test]
     fn renaming_is_independent_of_whitespace_and_preserves_locals() {
-        let mut source =
-            super::parse("uint32_t f(uint32_t f, uint32_t y) { return f+y; }").unwrap();
-        source.canonical = "uint32_t f(uint32_t f,uint32_t y){return f+y;}".into();
-        let renamed = source.renamed("subject").unwrap();
+        let source = super::parse("uint32_t f(uint32_t f, uint32_t y) { return f+y; }").unwrap();
         assert_eq!(
-            renamed,
+            source.renamed("subject").unwrap(),
             "uint32_t subject ( uint32_t f , uint32_t y ) { return f + y ; }"
         );
         assert!(source.renamed("bad-name").is_err());
-        source.name = "wrong".into();
-        assert!(source.renamed("subject").is_err());
     }
 
     use super::*;
@@ -375,7 +375,7 @@ mod tests {
             wrap("return x /* a */ + y;")
         ))
         .unwrap();
-        assert!(!s.canonical.contains("hello"));
+        assert!(!s.canonical().contains("hello"));
         assert!(parse("#include <stdio.h>").is_err());
     }
 
