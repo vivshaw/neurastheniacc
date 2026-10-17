@@ -37,21 +37,6 @@ enum Commands {
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
-    /// Compare model-assembled binaries against wat on fixed WAT fixtures exporting f.
-    Assembly {
-        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=5))]
-        attempts: u32,
-        #[command(flatten)]
-        model: ModelOptions,
-        #[arg(long, default_value = "fixtures/assembly")]
-        corpus: PathBuf,
-        #[arg(long)]
-        out_dir: PathBuf,
-        #[arg(long, default_value_t = 1000)]
-        cases: u32,
-        #[arg(long, default_value_t = 20261015)]
-        seed: u64,
-    },
     /// Measure the compiler across a corpus; semantic checks do not feed back into compilation.
     Bench {
         #[command(flatten)]
@@ -77,19 +62,6 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
-        Commands::Assembly {
-            attempts,
-            model,
-            corpus,
-            out_dir,
-            cases,
-            seed,
-        } => {
-            let compiler = model.load()?;
-            neurastheniacc::assembly_eval::bench(
-                &compiler, corpus, out_dir, *cases, *seed, *attempts,
-            )?;
-        }
         Commands::Run { wasm, export, x, y } => {
             println!(
                 "{}",
@@ -164,13 +136,8 @@ fn main() -> Result<()> {
             for (name, source) in sources {
                 fs::write(output.join(format!("{name}.c")), &source.canonical)?;
                 let artifact = output.join(format!("{name}.wasm"));
-                let compilation = compile::compile_with_options(
-                    &compiler,
-                    &source,
-                    &artifact,
-                    compile::Assembler::Wat,
-                    *attempts,
-                )?;
+                let compilation =
+                    compile::compile_with_options(&compiler, &source, &artifact, *attempts)?;
                 let report = eval::evaluate(compilation, &source, &artifact, *cases, *seed);
                 fs::write(
                     artifact.with_extension("check.json"),
@@ -186,7 +153,7 @@ fn main() -> Result<()> {
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
             let summary = serde_json::json!({
-                "schema_version": 3, "max_attempts": attempts, "programs": reports.len(), "counts": counts,
+                "schema_version": 4, "max_attempts": attempts, "programs": reports.len(), "counts": counts,
                 "seed": seed, "random_inputs_per_program": cases,
                 "edge_inputs_per_program": eval::inputs(0, *seed).len(),
                 "benchmark_seconds_excluding_model_load": start.elapsed().as_secs_f64(),

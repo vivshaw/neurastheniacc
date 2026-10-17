@@ -53,34 +53,6 @@ This loop belongs to the compiler. It uses syntax, Wasm type/structure validatio
 
 All attempts are retained in a unique directory beside the output (`mix.attempts-…/`), with exact inputs, responses, extracted WAT, diagnostics, and validated binaries. The final report lists that directory and every attempt. The requested `.wasm` is written only after success. Unsupported source is rejected before inference; the only text cleanup is removal of an optional single Markdown code fence.
 
-## Experimental model assembly
-
-The default assembler is still `wat`. To make the model produce the binary encoding too:
-
-```sh
-# Two fresh model contexts, one loaded model: C → WAT → hex bytes → Wasm.
-./target/release/neurastheniacc --offline compile examples/mix.c \
-  --assembler model -o runs/model-assembly/mix.wasm
-
-# Or give the model an existing WAT module directly.
-./target/release/neurastheniacc --offline assemble fixtures/assembly/01_add.wat \
-  --export f -o runs/model-assembly/add.wasm
-```
-
-After C-to-WAT validation succeeds, the second stage runs its own validation-feedback loop. `--attempts` limits each stage independently (five attempts per stage by default). Standalone `assemble --attempts 1` reproduces one-shot assembly. The binary loop feeds the original WAT, previous hex response, and actual hex-decoder/Wasm-validator diagnostics back to the model. It uses the frozen `prompts/assembly-v1.txt` system prompt. The decoder accepts hexadecimal digits and ASCII whitespace only; it does not supply or repair any binary bytes. Validation requires the requested `(i32, i32) -> i32` export and the same execution restrictions as ordinary compilation. There is no conventional assembler fallback. `--prompt` overrides the C-to-WAT prompt only.
-
-Each invocation saves `.assembly.input.wat`, `.assembly.prompt.txt`, `.assembly.raw.txt`, and `.assembly.report.json`. All attempt inputs, responses, decoded candidates and diagnostics are retained in a unique `*.assembly.attempts-…/` directory. Assembly report schema 2 includes the full history. Successfully decoded bytes are saved as `.candidate.wasm`, including invalid modules. Only validated candidates receive the requested `.wasm` filename. Compilation report schema 4 records the selected assembler and nests the second-stage report.
-
-Benchmark assembly independently of C translation:
-
-```sh
-cargo build --release --locked --bin neurastheniacc-bench
-./target/release/neurastheniacc-bench assembly --offline \
-  --out-dir runs/assembly-trial
-```
-
-This compares six frozen WAT fixtures against the `wat` reference assembler: arithmetic, signed LEB128, local declarations, branches, function/type indices, and multi-byte body/section lengths. All export `f`. It records byte equality separately from execution agreement on 324 edge pairs and 1,000 seeded random pairs. Reference binaries and execution counterexamples never enter model prompts. A valid binary stops the loop even if it implements the wrong behavior. Results and failed candidates are retained; the benchmark exits nonzero when any case fails.
-
 ## Model and cache
 
 `--model high` is the default. Both presets download pinned weights on first use and verify their size and SHA-256 before caching them.
@@ -104,7 +76,7 @@ The pinned revisions and checksums live in `src/model.rs`. The cache is `$XDG_CA
 
 `--offline` fails if the selected preset is absent, without contacting the network. `--model` also accepts a local GGUF path and records its hash; it requires a chat template supported by llama.cpp. GPU acceleration requires access to the GPU, which some application sandboxes restrict. `--gpu-layers 0` explicitly selects CPU inference. The first Metal inference may also incur kernel initialization costs.
 
-Both presets automatically use Qwen's text-only chat template with `enable_thinking=false`, including its empty thinking prefix. For a custom Qwen GGUF path, request this with `--qwen-no-thinking`. The setting and a hash of the complete rendered chat prompt are recorded in compilation reports. The compiler system prompt stays unchanged, and every model response is preserved. Repairs are new model responses driven by validator feedback, not edits made by the compiler.
+Both presets automatically use Qwen's text-only chat template with `enable_thinking=false`, including its empty thinking prefix. Override this with `--qwen-thinking` to use the model's thinking format (including the cached high model's default `xhigh` effort instruction). For example, use `--qwen-thinking --context 16384 --max-tokens 8192`; reasoning and the final answer share that output budget. Thinking mode preserves the raw response and saves separate `reasoning.txt` and `answer.txt` files in each attempt directory. Only text after the closing `</think>` is passed to the WAT parser; a missing closing delimiter is rejected. The non-thinking default is unchanged. For a custom Qwen GGUF path, request this with `--qwen-no-thinking`. The setting and a hash of the complete rendered chat prompt are recorded in compilation reports. The compiler system prompt stays unchanged, and every model response is preserved. Repairs are new model responses driven by validator feedback, not edits made by the compiler.
 
 The weights are the only downloaded runtime asset; there is no background process to manage. Compilation and Wasm execution do not require Clang.
 
@@ -151,6 +123,13 @@ cargo build --release --locked --bin neurastheniacc-bench
 ./target/release/neurastheniacc-bench bench \
   --model high --attempts 1 \
   --generated 24 --seed 20261014 --out-dir runs/qwen38-v4
+
+# Enable thinking for C → WAT, with up to five attempts.
+./target/release/neurastheniacc-bench bench --model high --offline \
+  --qwen-thinking --context 32768 --max-tokens 8192 \
+  --prompt prompts/v4.txt \
+  --attempts 5 --generated 24 --cases 1000 --seed 20261014 \
+  --out-dir runs/c-to-wat-thinking
 ```
 
 Measured results are in [benchmarks/README.md](benchmarks/README.md), with full raw responses in the archived JSON reports. In the historical one-shot runs on the same frozen 32-program corpus, the original 1.5B baseline passed 4/32, `low` (Qwen3.5-4B) passed 17/32, and `high` (Qwen3.8-27B) passed 31/32. Median compilation times were 0.73, 1.96, and 10.05 seconds respectively.
@@ -192,11 +171,9 @@ The tests require Clang but no model or network. They check front-end rejection,
 - `src/source.rs`: rejecting C front end; no code generation.
 - `src/model.rs`: cache, checksums, embedded inference and extraction.
 - `src/compile.rs`: compilation pipeline, artifacts and compilation reports.
-- `src/assembly.rs`: model-generated binary assembly and strict hex decoding.
-- `src/assembly_eval.rs`: WAT reference comparison, separate from compilation.
 - `src/wasm.rs`: Wasm validation and execution.
 - `src/eval.rs`: test harness, native Clang oracle, inputs and corpus generator.
-- `src/main.rs`: compiler CLI (`fetch`, `compile`, `assemble`).
+- `src/main.rs`: compiler CLI (`fetch`, `compile`).
 - `src/bin/neurastheniacc-bench.rs`: execution and evaluation CLI (`run`, `check`, `bench`).
 - `src/cli.rs`: shared model options; `src/lib.rs`: shared library entry point.
 - `prompts/`: versioned prompts.

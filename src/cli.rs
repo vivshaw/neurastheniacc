@@ -28,6 +28,9 @@ pub struct ModelOptions {
     /// Use Qwen's explicit non-thinking chat format (requires a compatible template).
     #[arg(long, global = true)]
     qwen_no_thinking: bool,
+    /// Enable Qwen thinking; overrides the presets' non-thinking default.
+    #[arg(long, global = true, conflicts_with = "qwen_no_thinking")]
+    qwen_thinking: bool,
 }
 
 impl ModelOptions {
@@ -38,7 +41,7 @@ impl ModelOptions {
             None => model::DEFAULT_PROMPT.into(),
         };
         eprintln!("Loading {} (in-process)…", path.display());
-        Compiler::load(
+        let compiler = Compiler::load(
             &path,
             sha,
             Settings {
@@ -46,11 +49,15 @@ impl ModelOptions {
                 max_tokens: self.max_tokens,
                 threads: self.threads,
                 gpu_layers: self.gpu_layers,
-                qwen_no_thinking: self.qwen_no_thinking
-                    || model::preset(&self.model).is_some_and(|preset| preset.qwen_no_thinking),
+                qwen_no_thinking: !self.qwen_thinking
+                    && (self.qwen_no_thinking
+                        || model::preset(&self.model)
+                            .is_some_and(|preset| preset.qwen_no_thinking)),
+                qwen_thinking: self.qwen_thinking,
             },
             prompt,
-        )
+        )?;
+        Ok(compiler)
     }
 
     pub fn resolve(&self) -> Result<(PathBuf, String)> {

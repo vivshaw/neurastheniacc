@@ -30,8 +30,6 @@ pub struct Report {
     error: Option<String>,
     generation: Option<Generation>,
     wasm_sha256: Option<String>,
-    assembler: Assembler,
-    assembly: Option<crate::assembly::Report>,
     max_attempts: u32,
     attempt_directory: PathBuf,
     attempts: Vec<Attempt>,
@@ -47,22 +45,14 @@ struct Attempt {
     seconds: f64,
 }
 
-#[derive(Clone, Copy, Serialize, clap::ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum Assembler {
-    Wat,
-    Model,
-}
-
 pub fn compile_one(compiler: &Compiler, source: &source::Source, output: &Path) -> Result<Report> {
-    compile_with_options(compiler, source, output, Assembler::Wat, DEFAULT_ATTEMPTS)
+    compile_with_options(compiler, source, output, DEFAULT_ATTEMPTS)
 }
 
 pub fn compile_with_options(
     compiler: &Compiler,
     source: &source::Source,
     output: &Path,
-    assembler: Assembler,
     max_attempts: u32,
 ) -> Result<Report> {
     ensure!(
@@ -86,16 +76,7 @@ pub fn compile_with_options(
         ))
         .tempdir_in(parent)?
         .keep();
-    for extension in [
-        "wasm",
-        "wat",
-        "raw.txt",
-        "candidate.wasm",
-        "assembly.raw.txt",
-        "assembly.input.wat",
-        "assembly.prompt.txt",
-        "assembly.report.json",
-    ] {
+    for extension in ["wasm", "wat", "raw.txt"] {
         let path = output.with_extension(extension);
         if path.exists() {
             fs::remove_file(path)?;
@@ -112,7 +93,7 @@ pub fn compile_with_options(
     })?;
     let last = attempts.last().unwrap();
     let mut report = Report {
-        schema_version: 4,
+        schema_version: 5,
         compiler_version: env!("CARGO_PKG_VERSION"),
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         model_sha256: compiler.model_sha256.clone(),
@@ -127,8 +108,6 @@ pub fn compile_with_options(
         error: last.error.clone(),
         generation: last.generation.clone(),
         wasm_sha256: None,
-        assembler,
-        assembly: None,
         max_attempts,
         attempt_directory,
         attempts,
@@ -142,32 +121,9 @@ pub fn compile_with_options(
     if last_wat.exists() {
         fs::copy(&last_wat, output.with_extension("wat"))?;
     }
-    if let Some(mut bytes) = bytes {
-        let result = (|| -> Result<()> {
-            if matches!(assembler, Assembler::Model) {
-                // Each stage has its own bounded validation-feedback loop.
-                report.status = "assembly_error".into();
-                report.assembly = Some(crate::assembly::assemble(
-                    compiler,
-                    &fs::read_to_string(&last_wat)?,
-                    &source.name,
-                    output,
-                    max_attempts,
-                )?);
-                ensure!(
-                    report.assembly.as_ref().unwrap().status == "assembled",
-                    "model assembly failed; see assembly report"
-                );
-                bytes = fs::read(output)?;
-            }
-            report.wasm_sha256 = Some(model::digest(&bytes));
-            fs::write(output, bytes)?;
-            report.status = "compiled".into();
-            Ok(())
-        })();
-        if let Err(error) = result {
-            report.error = Some(format!("{error:#}"));
-        }
+    if let Some(bytes) = bytes {
+        fs::write(output, &bytes)?;
+        report.wasm_sha256 = Some(model::digest(&bytes));
     }
     report.compilation_seconds = start.elapsed().as_secs_f64();
     fs::write(
@@ -226,13 +182,19 @@ fn wat_loop(
             attempt.generation = Some(generate(&input)?);
             let generation = attempt.generation.as_ref().unwrap();
             fs::write(prefix.with_extension("raw.txt"), &generation.raw)?;
+            if let Some(reasoning) = &generation.reasoning {
+                fs::write(prefix.with_extension("reasoning.txt"), reasoning)?;
+            }
+            if let Some(answer) = &generation.answer {
+                fs::write(prefix.with_extension("answer.txt"), answer)?;
+            }
             attempt.status = "token_limit".into();
             ensure!(
                 generation.stop == "eos",
                 "response reached its output token limit; return a complete, concise WAT module within the same budget"
             );
             attempt.status = "invalid_output".into();
-            let wat = model::extract_wat(&generation.raw)?;
+            let wat = model::extract_wat(generation.final_text()?)?;
             fs::write(prefix.with_extension("wat"), &wat)?;
             let bytes = wat::parse_str(&wat).context("assembling generated WAT")?;
             attempt.status = "invalid_wasm".into();
@@ -278,6 +240,8 @@ mod tests {
     fn generation(raw: &str) -> Generation {
         Generation {
             raw: raw.into(),
+            reasoning: None,
+            answer: None,
             chat_prompt_sha256: String::new(),
             prompt_tokens: 0,
             output_tokens: 0,

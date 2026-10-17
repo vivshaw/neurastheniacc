@@ -10,6 +10,4 @@
 *.prompt.txt
 *.check.json
 
-!fixtures/assembly/*.wat
-
 *.attempts-*/
