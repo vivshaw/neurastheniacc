@@ -45,7 +45,7 @@ pub fn preset(name: &str) -> Option<ModelPreset> {
         _ => None,
     }
 }
-pub const DEFAULT_PROMPT: &str = include_str!("../prompts/compiler.txt");
+pub const DEFAULT_PROMPT: &str = include_str!("../../../prompts/compiler.txt");
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

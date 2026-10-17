@@ -1,6 +1,6 @@
-use crate::source::Source;
-use crate::wasm::Wasm;
 use anyhow::{Context, Result, ensure};
+use neurastheniacc::source::Source;
+use neurastheniacc::wasm::Wasm;
 use serde::Serialize;
 use std::{
     fs::{self, File},
@@ -145,7 +145,7 @@ impl CheckStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum EvaluationStatus {
-    Compilation(crate::compile::Status),
+    Compilation(neurastheniacc::compile::Status),
     Check(CheckStatus),
 }
 
@@ -248,25 +248,28 @@ pub fn generated(count: u32, seed: u64) -> Vec<(String, String)> {
 #[derive(Serialize)]
 pub struct Evaluation {
     pub status: EvaluationStatus,
-    pub compilation: crate::compile::Report,
+    pub compilation: neurastheniacc::compile::Report,
+    /// Attempt reports relative to the program directory; owned by the harness.
+    pub attempts: Vec<std::path::PathBuf>,
     pub check: Option<Check>,
     pub error: Option<String>,
 }
 
 pub fn evaluate(
-    compilation: crate::compile::Compilation,
+    compilation: neurastheniacc::compile::Compilation,
     source: &Source,
     cases: u32,
     seed: u64,
 ) -> Evaluation {
-    let crate::compile::Compilation { report, output } = compilation;
+    let neurastheniacc::compile::Compilation { report, output } = compilation;
     let mut result = Evaluation {
         status: EvaluationStatus::Compilation(report.status),
         compilation: report,
+        attempts: Vec::new(),
         check: None,
         error: None,
     };
-    if result.compilation.status != crate::compile::Status::Compiled {
+    if result.compilation.status != neurastheniacc::compile::Status::Compiled {
         return result;
     }
     match (|| -> Result<Check> {
@@ -291,7 +294,7 @@ mod tests {
     use super::*;
     #[test]
     fn typed_statuses_preserve_flat_report_values() {
-        use crate::{compile::Status, model::StopReason};
+        use neurastheniacc::{compile::Status, model::StopReason};
         for status in [
             Status::Compiled,
             Status::GenerationError,
@@ -327,7 +330,7 @@ mod tests {
 
     #[test]
     fn differential_check_catches_signed_comparisons() {
-        let source = crate::source::parse(
+        let source = neurastheniacc::source::parse(
             "uint32_t f(uint32_t x, uint32_t y) { if (x > y) { return x; } return y; }",
         )
         .unwrap();
@@ -361,22 +364,23 @@ mod tests {
     }
     #[test]
     fn oracle_does_not_pollute_the_source_namespace() {
-        let source =
-            crate::source::parse("uint32_t ncc_x(uint32_t EOF, uint32_t y) { return EOF + y; }")
-                .unwrap();
+        let source = neurastheniacc::source::parse(
+            "uint32_t ncc_x(uint32_t EOF, uint32_t y) { return EOF + y; }",
+        )
+        .unwrap();
         assert_eq!(reference(&source, &[[3, 5]]).unwrap(), vec![8]);
     }
     #[test]
     fn oracle_tolerates_identifiers_that_stdint_macros_would_clobber() {
         for name in ["UINT32_MAX", "UINT32_C", "INT32_MIN"] {
             let text = format!("uint32_t f(uint32_t {name}, uint32_t y) {{ return {name} + y; }}");
-            let source = crate::source::parse(&text).unwrap();
+            let source = neurastheniacc::source::parse(&text).unwrap();
             assert_eq!(reference(&source, &[[3, 5]]).unwrap(), vec![8]);
         }
     }
     #[test]
     fn oracle_tolerates_code_the_front_end_accepts() {
-        let source = crate::source::parse(
+        let source = neurastheniacc::source::parse(
             "uint32_t f(uint32_t x, uint32_t y) { uint32_t unused = x; return y; }",
         )
         .unwrap();
@@ -385,7 +389,7 @@ mod tests {
     #[test]
     fn generated_c_is_supported_and_compiles() {
         for (_, text) in generated(8, 42) {
-            let source = crate::source::parse(&text).unwrap();
+            let source = neurastheniacc::source::parse(&text).unwrap();
             assert_eq!(
                 reference(&source, &[[0, 0], [u32::MAX, 1]]).unwrap().len(),
                 2

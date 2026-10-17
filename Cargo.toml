@@ -1,24 +1,6 @@
-[package]
-name = "neurastheniacc"
-version = "0.1.0"
-edition = "2024"
-default-run = "neurastheniacc"
-
-[dependencies]
-anyhow = "1.0.104"
-clap = { version = "4.6.7", features = ["derive"] }
-llama-cpp-2 = { version = "=0.1.159", default-features = false }
-reqwest = { version = "0.13.5", features = ["blocking"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
-sha2 = "0.11.1"
-tempfile = "3.27.0"
-wasmi = "0.40"
-wasmparser = "0.221"
-wat = "1.262.0"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-llama-cpp-2 = { version = "=0.1.159", default-features = false, features = ["metal"] }
+[workspace]
+members = ["crates/neurastheniacc", "crates/neurastheniacc-bench"]
+resolver = "3"
 
 [profile.release]
 lto = "thin"

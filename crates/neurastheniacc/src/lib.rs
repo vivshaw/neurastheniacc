@@ -1,7 +1,6 @@
 pub mod artifact;
 pub mod cli;
 pub mod compile;
-pub mod eval;
 pub mod model;
 mod prompt;
 pub mod source;

@@ -16,7 +16,7 @@ With Nix (flakes enabled), enter the pinned development environment:
 
 ```sh
 nix develop
-cargo build --release --locked --bins
+cargo build --workspace --release --locked --bins
 ```
 
 The shell provides Rust, Cargo, rustfmt, Clippy, rust-analyzer, Clang/libclang, CMake, and Wasmtime. It targets Apple Silicon macOS and ARM64/x86-64 Linux. Metal remains enabled on macOS; Linux uses CPU inference. No separate model server or system Rust installation is needed.
@@ -85,7 +85,7 @@ Normal compilation writes only the sibling `.wat` and `.wasm` files. Diagnostics
 | `high` (default) | [Qwen3.8-27B UD-Q4_K_M](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | 16.46 GB | Non-thinking, configured automatically |
 | `low` | [Qwen3.5-4B Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF) | 2.74 GB | Non-thinking, configured automatically |
 
-The pinned revisions and checksums live in `src/model.rs`. The cache is `$XDG_CACHE_HOME/neurastheniacc` if set, otherwise `~/Library/Caches/neurastheniacc` on macOS or `~/.cache/neurastheniacc` elsewhere. Override it with `--cache-dir`. Downloads use a temporary file and are atomically installed only after size and checksum validation. Interrupted downloads are discarded; the next attempt starts again. Cached weights are verified on each model-using invocation.
+The pinned revisions and checksums live in `crates/neurastheniacc/src/model.rs`. The cache is `$XDG_CACHE_HOME/neurastheniacc` if set, otherwise `~/Library/Caches/neurastheniacc` on macOS or `~/.cache/neurastheniacc` elsewhere. Override it with `--cache-dir`. Downloads use a temporary file and are atomically installed only after size and checksum validation. Interrupted downloads are discarded; the next attempt starts again. Cached weights are verified on each model-using invocation.
 
 ```sh
 ./target/release/neurastheniacc fetch                  # Cache high ahead of time
@@ -123,7 +123,7 @@ Source is capped at 32 KiB, 4096 tokens and 48 nesting levels. C line splicing a
 
 ## Benchmarking
 
-The separate `neurastheniacc-bench` executable provides `run` for execution, `check` for comparing an artifact against Clang, and `bench` for compiling and evaluating a corpus. `check` and `bench` require Clang. Test failures do not change compilation reports or remove artifacts.
+The separate `neurastheniacc-bench` executable provides `run` for execution, `check` for comparing an artifact against Clang, and `bench` for compiling and evaluating a corpus. `check` and `bench` require Clang. Test failures do not change compilation reports or remove artifacts. In `check.json`, the harness-owned top-level `attempts` array lists relative paths to attempt reports; those paths are no longer part of the nested `compilation` report.
 
 ```sh
 cargo build --release --locked --bin neurastheniacc-bench
@@ -154,7 +154,7 @@ Benchmark output defaults to the gitignored `benchmarks/<Unix timestamp>/` direc
 
 Each function is tested against Clang `-std=c11 -O2` on a fixed 18 × 18 grid of edge values plus 1,000 seeded random input pairs by default. `--cases` changes the random count; the 324 edge pairs are always included. Testing stops at the first mismatch or runtime error and reports both the planned and executed counts. The RNG algorithm is fixed for reproducibility.
 
-The benchmark calls the same compiler loop as `compile`, with five total attempts by default. It explicitly enables recording: each program gets its own directory, with numbered subdirectories under `attempts/` containing inputs, raw responses, diagnostics, and extracted WAT. Ordinary compilation does not enable recording. `bench --attempts 1` reproduces the one-shot baselines. The model stays loaded across a benchmark, but every generation attempt receives a fresh inference context. Decoding is greedy. This does **not** promise identical bytes across hardware or inference-library versions.
+The benchmark calls the same compiler loop as `compile`, with five total attempts by default. It supplies an attempt callback and records the observations in the benchmark crate: each program gets its own directory, with numbered subdirectories under `attempts/` containing inputs, raw responses, diagnostics, and extracted WAT. Ordinary compilation does not attach an attempt callback. The compiler exposes attempt data but does not choose recording paths or persist attempt history. `bench --attempts 1` reproduces the one-shot baselines. The model stays loaded across a benchmark, but every generation attempt receives a fresh inference context. Decoding is greedy. This does **not** promise identical bytes across hardware or inference-library versions.
 
 Every candidate is checked for a correct `(i32, i32) -> i32` export. Execution forbids imports, start functions, globals, memories and tables. Each input runs in a fresh Wasm instance with a 100,000-unit fuel limit. These restrictions are part of this prototype's contract.
 
@@ -195,22 +195,25 @@ The bundled prompt is `prompts/compiler.txt`. Historical benchmark references to
 ## Development
 
 ```sh
-cargo test --release --locked
-cargo clippy --release --locked --all-targets -- -D warnings
-cargo fmt --check
+cargo test --workspace --release --locked
+cargo clippy --workspace --release --locked --all-targets -- -D warnings
+cargo fmt --all --check
 ```
 
 The tests require Clang but no model or network. They check front-end rejection, wrapping arithmetic, unsigned comparison counterexamples, bounded Wasm execution, forbidden module features, generated source validity, cache failure modes, strict output extraction, feedback propagation, retry limits, and stopping on validation success without semantic feedback.
 
-- `src/source.rs`: rejecting C front end; no code generation.
-- `src/model.rs`: cache, checksums and embedded inference.
-- `src/prompt.rs`: Qwen chat formatting and reasoning boundaries.
-- `src/compile.rs`: compilation pipeline, artifacts and compilation reports.
-- `src/wasm.rs`: Wasm validation and execution.
-- `src/eval.rs`: test harness, native Clang oracle, inputs and corpus generator.
-- `src/main.rs`: compiler CLI (`fetch`, `compile`).
-- `src/bin/neurastheniacc-bench.rs`: execution and evaluation CLI (`run`, `check`, `bench`).
-- `src/cli.rs`: shared model options; `src/lib.rs`: shared library entry point.
+The Cargo workspace contains two packages: `neurastheniacc` owns compilation and its CLI; `neurastheniacc-bench` depends on its public API and owns evaluation. The compiler does not depend on the benchmark harness. Build or test either package with `-p neurastheniacc` or `-p neurastheniacc-bench`.
+
+- `crates/neurastheniacc/src/source.rs`: rejecting C front end; no code generation.
+- `crates/neurastheniacc/src/model.rs`: cache, checksums and embedded inference.
+- `crates/neurastheniacc/src/prompt.rs`: Qwen chat formatting and reasoning boundaries.
+- `crates/neurastheniacc/src/compile.rs`: compilation pipeline, artifacts and compilation reports.
+- `crates/neurastheniacc/src/wasm.rs`: Wasm validation and execution.
+- `crates/neurastheniacc-bench/src/recording.rs`: benchmark attempt files and relative report paths.
+- `crates/neurastheniacc-bench/src/eval.rs`: test harness, native Clang oracle, inputs and corpus generator.
+- `crates/neurastheniacc/src/main.rs`: compiler CLI (`fetch`, `compile`).
+- `crates/neurastheniacc-bench/src/main.rs`: execution and evaluation CLI (`run`, `check`, `bench`).
+- `crates/neurastheniacc/src/cli.rs`: shared model options; `crates/neurastheniacc/src/lib.rs`: shared library entry point.
 - `prompts/compiler.txt`: the bundled C-to-WAT prompt.
 - `fixtures/eval/`: fixed smoke corpus.
 

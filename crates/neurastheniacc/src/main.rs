@@ -64,7 +64,7 @@ fn main() -> Result<()> {
                 *attempts,
                 compile::Options {
                     verbose: *verbose,
-                    record: false,
+                    on_attempt: None,
                 },
             )?;
             ensure!(

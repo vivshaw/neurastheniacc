@@ -67,8 +67,6 @@ pub struct Report {
     wasm_sha256: Option<String>,
     max_attempts: u32,
     attempt_count: usize,
-    /// Paths relative to the program directory; empty when recording is disabled.
-    attempts: Vec<PathBuf>,
 }
 
 impl Report {
@@ -82,12 +80,12 @@ impl Report {
 }
 
 #[derive(Serialize)]
-struct Attempt {
-    number: u32,
-    status: Status,
-    error: Option<String>,
-    generation: Option<Generation>,
-    seconds: f64,
+pub struct Attempt {
+    pub number: u32,
+    pub status: Status,
+    pub error: Option<String>,
+    pub generation: Option<Generation>,
+    pub seconds: f64,
 }
 
 /// Every path derived from the output; construction lives here so callers cannot disagree.
@@ -142,11 +140,15 @@ pub struct Compilation {
     pub output: Option<Vec<u8>>,
 }
 
+/// Called after each completed attempt with its input and extracted WAT, when available.
+/// An observer error aborts compilation; it is never treated as a model failure or retried.
+/// Borrowed data is valid only for the call. Observers cannot change retry decisions.
+pub type AttemptObserver<'a> = dyn FnMut(&Attempt, &str, Option<&str>) -> Result<()> + 'a;
+
 #[derive(Default)]
-pub struct Options {
+pub struct Options<'a> {
     pub verbose: bool,
-    /// Benchmark-only persistence of responses, reports, and attempt history.
-    pub record: bool,
+    pub on_attempt: Option<&'a mut AttemptObserver<'a>>,
 }
 
 pub fn compile(
@@ -154,7 +156,7 @@ pub fn compile(
     source: &source::Source,
     output: &Path,
     max_attempts: u32,
-    options: Options,
+    options: Options<'_>,
 ) -> Result<Compilation> {
     ensure!(
         (1..=MAX_ATTEMPTS).contains(&max_attempts),
@@ -170,14 +172,6 @@ pub fn compile(
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
-    // Benchmark programs each get a fresh directory; never mix attempt histories.
-    let attempt_directory = if options.record {
-        let directory = parent.join("attempts");
-        fs::create_dir(&directory)?;
-        Some(directory)
-    } else {
-        None
-    };
     // A failed recompile must not leave an older binary looking like its result.
     for artifact in artifacts.iter() {
         if artifact.exists() {
@@ -192,7 +186,7 @@ pub fn compile(
     } = wat_loop(
         source,
         max_attempts,
-        attempt_directory.as_deref(),
+        options.on_attempt,
         options.verbose,
         |input| compiler.generate(input),
     )?;
@@ -211,18 +205,6 @@ pub fn compile(
         wasm_sha256: None,
         max_attempts,
         attempt_count: attempts.len(),
-        attempts: if options.record {
-            attempts
-                .iter()
-                .map(|attempt| {
-                    PathBuf::from("attempts")
-                        .join(attempt.number.to_string())
-                        .join("report.json")
-                })
-                .collect()
-        } else {
-            Vec::new()
-        },
     };
     if let Some(wat) = wat {
         artifact::write(&artifacts.wat, wat)?;
@@ -379,7 +361,7 @@ impl Outcome {
 fn wat_loop(
     source: &source::Source,
     max_attempts: u32,
-    directory: Option<&Path>,
+    mut on_attempt: Option<&mut AttemptObserver<'_>>,
     verbose: bool,
     mut generate: impl FnMut(&str) -> Result<Generation>,
 ) -> Result<LoopOutput> {
@@ -387,24 +369,8 @@ fn wat_loop(
     let mut wat = None;
     let mut input = source.canonical().to_owned();
     for number in 1..=max_attempts {
-        let prefix = directory.map(|directory| directory.join(number.to_string()));
-        if let Some(prefix) = &prefix {
-            fs::create_dir(prefix)?;
-            artifact::write(prefix.join("input.txt"), &input)?;
-        }
         let start = Instant::now();
         let output = produce_attempt(source, &input, &mut generate);
-        // Persist everything the attempt produced; I/O failures abort compilation.
-        if let Some(prefix) = &prefix
-            && let Some(generation) = &output.generation
-        {
-            artifact::write(prefix.join("raw.txt"), &generation.raw)?;
-        }
-        if let Some(prefix) = &prefix
-            && let Some(wat) = &output.wat
-        {
-            artifact::write(prefix.join("output.wat"), wat)?;
-        }
         wat = output.wat;
         let (status, error, bytes) = match output.outcome {
             Outcome::Compiled(bytes) => (Status::Compiled, None, Some(bytes)),
@@ -417,11 +383,8 @@ fn wat_loop(
             generation: output.generation,
             seconds: start.elapsed().as_secs_f64(),
         };
-        if let Some(prefix) = &prefix {
-            artifact::write(
-                prefix.join("report.json"),
-                serde_json::to_string_pretty(&attempt)?,
-            )?;
+        if let Some(observer) = on_attempt.as_deref_mut() {
+            observer(&attempt, &input, wat.as_deref())?;
         }
         if verbose {
             eprintln!(
@@ -504,12 +467,11 @@ mod tests {
 
     #[test]
     fn feeds_syntax_and_validation_errors_back_and_stops_on_success() {
-        let dir = tempfile::tempdir().unwrap();
         let src = source();
         let mut calls = 0;
         let LoopOutput {
             attempts, bytes, ..
-        } = wat_loop(&src, 5, Some(dir.path()), false, |input| {
+        } = wat_loop(&src, 5, None, false, |input| {
             calls += 1;
             match calls {
                 1 => {
@@ -538,69 +500,59 @@ mod tests {
         );
         assert_eq!(attempts.len(), 3);
         assert!(bytes.is_some());
-        assert!(dir.path().join("1/raw.txt").exists());
-        assert!(dir.path().join("3/output.wat").exists());
-        let report: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(dir.path().join("1/report.json")).unwrap())
-                .unwrap();
-        assert_eq!(report["status"], "invalid_wat");
-        assert!(report["error"].as_str().unwrap().contains("assembling"));
-        assert!(report.get("input").is_none());
-        let generation = report["generation"].as_object().unwrap();
-        assert_eq!(generation.len(), 4);
-        assert_eq!(generation["stop"], "eos");
-        assert!(generation.contains_key("prompt_tokens"));
-        assert!(generation.contains_key("output_tokens"));
-        assert!(generation.contains_key("seconds"));
-        assert_eq!(
-            fs::read_to_string(dir.path().join("1/raw.txt")).unwrap(),
-            "(module"
-        );
-        assert_eq!(
-            fs::read_to_string(dir.path().join("1/input.txt")).unwrap(),
-            src.canonical()
-        );
+        assert_eq!(attempts[0].generation.as_ref().unwrap().raw, "(module");
     }
 
     #[test]
-    fn recording_is_optional_and_does_not_change_repair_results() {
-        let dir = tempfile::tempdir().unwrap();
-        let run = |directory| {
+    fn observer_receives_attempts_without_changing_results() {
+        let mut seen = Vec::new();
+        let mut observer = |attempt: &Attempt, input: &str, wat: Option<&str>| {
+            seen.push((
+                attempt.number,
+                attempt.status,
+                input.to_owned(),
+                wat.map(str::to_owned),
+            ));
+            Ok(())
+        };
+        let run = |observer: Option<&mut AttemptObserver<'_>>| {
             let mut calls = 0;
-            wat_loop(&source(), 2, directory, false, |input| {
+            wat_loop(&source(), 2, observer, false, |_| {
                 calls += 1;
-                if calls == 1 {
-                    Ok(generation("(module"))
-                } else {
-                    assert!(input.contains("invalid_wat"));
-                    Ok(generation(VALID))
-                }
+                Ok(generation(if calls == 1 { "(module" } else { VALID }))
             })
             .unwrap()
         };
         let ordinary = run(None);
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
-        let recorded = run(Some(dir.path()));
-        assert_eq!(ordinary.bytes, recorded.bytes);
-        assert_eq!(ordinary.wat, recorded.wat);
+        let observed = run(Some(&mut observer));
+        assert_eq!(ordinary.bytes, observed.bytes);
+        assert_eq!(ordinary.wat, observed.wat);
+        assert_eq!(seen.len(), 2);
         assert_eq!(
-            ordinary
-                .attempts
-                .iter()
-                .map(|a| a.status)
-                .collect::<Vec<_>>(),
-            recorded
-                .attempts
-                .iter()
-                .map(|a| a.status)
-                .collect::<Vec<_>>()
+            seen[0],
+            (
+                1,
+                Status::InvalidWat,
+                source().canonical().to_owned(),
+                Some("(module".into())
+            )
         );
-        assert!(dir.path().join("1/report.json").exists());
-        assert!(dir.path().join("2/output.wat").exists());
-        let failed = wat_loop(&source(), 1, None, false, |_| Ok(generation("bad"))).unwrap();
-        assert_eq!(failed.attempts[0].status, Status::InvalidOutput);
-        assert!(failed.bytes.is_none());
-        assert!(failed.wat.is_none());
+        assert_eq!(seen[1].0, 2);
+        assert_eq!(seen[1].1, Status::Compiled);
+        assert!(seen[1].2.contains("invalid_wat"));
+        assert_eq!(seen[1].3.as_deref(), Some(VALID));
+    }
+
+    #[test]
+    fn observer_errors_abort_without_retrying() {
+        let mut calls = 0;
+        let mut observer = |_: &Attempt, _: &str, _: Option<&str>| anyhow::bail!("observer failed");
+        let result = wat_loop(&source(), 5, Some(&mut observer), false, |_| {
+            calls += 1;
+            Ok(generation("bad"))
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(result.err().unwrap().to_string(), "observer failed");
     }
 
     #[test]
@@ -610,13 +562,12 @@ mod tests {
             (None, StopReason::TokenLimit, Status::TokenLimit),
             (None, StopReason::Eos, Status::InvalidOutput),
         ] {
-            let dir = tempfile::tempdir().unwrap();
             let mut calls = 0;
             let raw = format!(
                 "PRIVATE_REASONING{}",
                 answer.map_or(String::new(), |a| format!("</think>{a}"))
             );
-            let result = wat_loop(&source(), 2, Some(dir.path()), false, |input| {
+            let result = wat_loop(&source(), 2, None, false, |input| {
                 calls += 1;
                 if calls == 1 {
                     let mut output = generation(&raw);
@@ -642,27 +593,18 @@ mod tests {
             .unwrap();
             assert_eq!(result.attempts[0].status, expected);
             assert_eq!(result.attempts[1].status, Status::Compiled);
-            let metadata = fs::read_to_string(dir.path().join("1/report.json")).unwrap();
+            let metadata = serde_json::to_string(&result.attempts[0]).unwrap();
             assert!(!metadata.contains("PRIVATE_REASONING"));
-            assert!(!dir.path().join("1/reasoning.txt").exists());
-            assert!(!dir.path().join("1/answer.txt").exists());
-            assert_eq!(
-                fs::read_to_string(dir.path().join("1/raw.txt")).unwrap(),
-                raw
-            );
+            assert_eq!(result.attempts[0].generation.as_ref().unwrap().raw, raw);
         }
     }
 
     #[test]
     fn respects_attempt_limit_and_does_not_retry_infrastructure_errors() {
         for limit in [1, 5] {
-            let dir = tempfile::tempdir().unwrap();
             let LoopOutput {
                 attempts, bytes, ..
-            } = wat_loop(&source(), limit, Some(dir.path()), false, |_| {
-                Ok(generation("bad"))
-            })
-            .unwrap();
+            } = wat_loop(&source(), limit, None, false, |_| Ok(generation("bad"))).unwrap();
             assert_eq!(attempts.len(), limit as usize);
             assert!(bytes.is_none());
         }
@@ -679,14 +621,12 @@ mod tests {
 
     #[test]
     fn final_attempt_artifact_does_not_reuse_an_earlier_wat() {
-        let dir = tempfile::tempdir().unwrap();
         let mut calls = 0;
-        let result = wat_loop(&source(), 2, Some(dir.path()), false, |_| {
+        let result = wat_loop(&source(), 2, None, false, |_| {
             calls += 1;
             Ok(generation(if calls == 1 { "(module" } else { "not WAT" }))
         })
         .unwrap();
-        assert!(dir.path().join("1/output.wat").exists());
         assert!(result.wat.is_none());
         assert!(result.bytes.is_none());
         let result = wat_loop(&source(), 1, None, false, |_| Ok(generation(VALID))).unwrap();
@@ -695,10 +635,9 @@ mod tests {
 
     #[test]
     fn valid_but_wrong_program_stops_without_semantic_feedback() {
-        let dir = tempfile::tempdir().unwrap();
         let LoopOutput {
             attempts, bytes, ..
-        } = wat_loop(&source(), 5, Some(dir.path()), false, |_| {
+        } = wat_loop(&source(), 5, None, false, |_| {
             Ok(generation(
                 "(module (func (export \"f\") (param i32 i32) (result i32) i32.const 0))",
             ))

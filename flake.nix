@@ -28,10 +28,8 @@
               fileset = pkgs.lib.fileset.unions [
                 ./Cargo.toml
                 ./Cargo.lock
-                ./src
+                ./crates
                 ./prompts
-                ./fixtures
-                ./examples
               ];
             };
             cargoLock.lockFile = ./Cargo.lock;

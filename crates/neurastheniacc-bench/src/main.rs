@@ -1,6 +1,9 @@
+mod eval;
+mod recording;
+
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
-use neurastheniacc::{artifact, cli::ModelOptions, compile, eval, source, wasm};
+use neurastheniacc::{artifact, cli::ModelOptions, compile, source, wasm};
 use std::{
     collections::BTreeMap,
     fs,
@@ -205,6 +208,11 @@ fn main() -> Result<()> {
                 fs::create_dir(&program_directory)?;
                 fs::write(program_directory.join("source.c"), source.canonical())?;
                 let artifact = program_directory.join("output.wasm");
+                let mut recorder = recording::Recorder::new(&program_directory)?;
+                let mut on_attempt =
+                    |attempt: &compile::Attempt, input: &str, wat: Option<&str>| {
+                        recorder.record(attempt, input, wat)
+                    };
                 let compilation = compile::compile(
                     &generator,
                     &source,
@@ -212,10 +220,11 @@ fn main() -> Result<()> {
                     *attempts,
                     compile::Options {
                         verbose: true,
-                        record: true,
+                        on_attempt: Some(&mut on_attempt),
                     },
                 )?;
-                let report = eval::evaluate(compilation, &source, *cases, *seed);
+                let mut report = eval::evaluate(compilation, &source, *cases, *seed);
+                report.attempts = recorder.paths;
                 artifact::write(
                     program_directory.join("check.json"),
                     serde_json::to_string_pretty(&report)?,
