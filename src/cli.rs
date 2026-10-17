@@ -32,6 +32,10 @@ pub struct ModelOptions {
 
 impl ModelOptions {
     pub fn load(&self) -> Result<Compiler> {
+        self.load_with_prompt(model::DEFAULT_PROMPT.into())
+    }
+
+    pub fn load_with_prompt(&self, prompt: String) -> Result<Compiler> {
         let (path, sha) = self.resolve()?;
         eprintln!("Loading {} (in-process)…", path.display());
         Compiler::load(
@@ -44,7 +48,7 @@ impl ModelOptions {
                 gpu_layers: self.gpu_layers,
                 chat_mode: self.chat_mode(),
             },
-            model::DEFAULT_PROMPT.into(),
+            prompt,
         )
     }
 
@@ -60,16 +64,6 @@ impl ModelOptions {
 
     pub fn resolve(&self) -> Result<(PathBuf, String)> {
         let cache = self.cache_dir.clone().unwrap_or_else(model::default_cache);
-        // Reuse verified weights downloaded before the compiler was renamed.
-        if self.cache_dir.is_none()
-            && let Some(preset) = model::preset(&self.model)
-            && !cache.join(preset.file).exists()
-        {
-            let legacy_cache = cache.with_file_name("neuralcc");
-            if legacy_cache.join(preset.file).exists() {
-                return model::resolve(&self.model, &legacy_cache, self.offline);
-            }
-        }
         model::resolve(&self.model, &cache, self.offline)
     }
 }

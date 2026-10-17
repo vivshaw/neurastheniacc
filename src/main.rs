@@ -56,7 +56,7 @@ fn main() -> Result<()> {
             let compiler = cli.model.load()?;
             let report = compile::compile_with_options(&compiler, &parsed, &output, *attempts)?;
             ensure!(
-                report.status == "compiled",
+                report.status == compile::Status::Compiled,
                 "compilation failed; see {}",
                 output.with_extension("report.json").display()
             );

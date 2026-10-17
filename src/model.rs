@@ -166,6 +166,13 @@ pub struct Settings {
     pub chat_mode: ChatMode,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    Eos,
+    TokenLimit,
+}
+
 #[derive(Clone, Serialize)]
 pub struct Generation {
     pub raw: String,
@@ -176,7 +183,7 @@ pub struct Generation {
     pub prompt_tokens: usize,
     pub output_tokens: usize,
     pub seconds: f64,
-    pub stop: &'static str,
+    pub stop: StopReason,
 }
 
 impl Generation {
@@ -197,7 +204,7 @@ pub struct Compiler {
     pub settings: Settings,
     pub model_sha256: String,
     pub load_seconds: f64,
-    pub prompt: String,
+    prompt: String,
 }
 
 impl Compiler {
@@ -264,9 +271,10 @@ impl Compiler {
             tokens.len(),
             self.settings.context
         );
+        const BATCH_SIZE: usize = 512;
         let params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(self.settings.context))
-            .with_n_batch(512)
+            .with_n_batch(BATCH_SIZE as u32)
             .with_offload_kqv(self.settings.gpu_layers > 0)
             .with_op_offload(self.settings.gpu_layers > 0)
             .with_n_threads(self.settings.threads)
@@ -274,11 +282,11 @@ impl Compiler {
         let mut ctx = self.model.new_context(&self.backend, params).context(
             "creating inference context; if GPU access is unavailable, try --gpu-layers 0",
         )?;
-        let mut batch = LlamaBatch::new(512, 1);
-        for (chunk_idx, chunk) in tokens.chunks(512).enumerate() {
+        let mut batch = LlamaBatch::new(BATCH_SIZE, 1);
+        for (chunk_idx, chunk) in tokens.chunks(BATCH_SIZE).enumerate() {
             batch.clear();
             for (j, &token) in chunk.iter().enumerate() {
-                let pos = chunk_idx * 512 + j;
+                let pos = chunk_idx * BATCH_SIZE + j;
                 batch.add(token, pos as i32, &[0], pos == tokens.len() - 1)?;
             }
             ctx.decode(&mut batch)?;
@@ -286,12 +294,12 @@ impl Compiler {
         let mut sampler = LlamaSampler::greedy();
         let mut bytes = Vec::new();
         let mut count = 0;
-        let mut stop = "token_limit";
+        let mut stop = StopReason::TokenLimit;
         for index in 0..self.settings.max_tokens {
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
             sampler.accept(token);
             if vocab.is_eog(token) {
-                stop = "eos";
+                stop = StopReason::Eos;
                 break;
             }
             // llama-cpp-2's second argument is `special`: retain </think> so

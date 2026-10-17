@@ -30,6 +30,7 @@ impl Wasm {
             module,
             export: export.into(),
         };
+        // Check resource limits, absence of a start function, and the export signature now.
         this.instance()?;
         Ok(this)
     }

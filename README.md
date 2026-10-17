@@ -62,7 +62,7 @@ All attempts are retained in a unique directory beside the output (`mix.attempts
 | `high` (default) | [Qwen3.8-27B UD-Q4_K_M](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | 16.46 GB | Non-thinking, configured automatically |
 | `low` | [Qwen3.5-4B Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF) | 2.74 GB | Non-thinking, configured automatically |
 
-The pinned revisions and checksums live in `src/model.rs`. The cache is `$XDG_CACHE_HOME/neurastheniacc` if set, otherwise `~/Library/Caches/neurastheniacc` on macOS or `~/.cache/neurastheniacc` elsewhere. Override it with `--cache-dir`. Existing downloads in the former `neuralcc` cache are also reused when the selected model is absent from the new cache and `--cache-dir` is not set. Downloads use a temporary file and are atomically installed only after size and checksum validation. Interrupted downloads are discarded; the next attempt starts again. Cached weights are verified on each model-using invocation.
+The pinned revisions and checksums live in `src/model.rs`. The cache is `$XDG_CACHE_HOME/neurastheniacc` if set, otherwise `~/Library/Caches/neurastheniacc` on macOS or `~/.cache/neurastheniacc` elsewhere. Override it with `--cache-dir`. Downloads use a temporary file and are atomically installed only after size and checksum validation. Interrupted downloads are discarded; the next attempt starts again. Cached weights are verified on each model-using invocation.
 
 ```sh
 ./target/release/neurastheniacc fetch                  # Cache high ahead of time

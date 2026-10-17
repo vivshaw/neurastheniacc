@@ -111,9 +111,46 @@ int main(void) {
     Ok(values)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Passed,
+    Mismatch,
+    RuntimeError,
+    CheckError,
+}
+
+impl CheckStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Mismatch => "mismatch",
+            Self::RuntimeError => "runtime_error",
+            Self::CheckError => "check_error",
+        }
+    }
+}
+
+// Preserve the existing flat JSON status while keeping compilation and checking distinct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum EvaluationStatus {
+    Compilation(crate::compile::Status),
+    Check(CheckStatus),
+}
+
+impl std::fmt::Display for EvaluationStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Compilation(status) => status.as_str(),
+            Self::Check(status) => status.as_str(),
+        })
+    }
+}
+
 #[derive(Serialize, Debug)]
 pub struct Check {
-    pub status: &'static str,
+    pub status: CheckStatus,
     pub total_inputs: usize,
     pub executed_inputs: usize,
     pub seed: u64,
@@ -139,7 +176,7 @@ pub fn compare(source: &Source, wasm: &Wasm, random: u32, seed: u64) -> Result<C
     let reference_seconds = start.elapsed().as_secs_f64();
     let start = Instant::now();
     let mut check = Check {
-        status: "passed",
+        status: CheckStatus::Passed,
         total_inputs: cases.len(),
         executed_inputs: 0,
         seed,
@@ -152,7 +189,7 @@ pub fn compare(source: &Source, wasm: &Wasm, random: u32, seed: u64) -> Result<C
         match wasm.run(input[0], input[1]) {
             Ok(actual) if actual == expected => {}
             Ok(actual) => {
-                check.status = "mismatch";
+                check.status = CheckStatus::Mismatch;
                 check.counterexample = Some(Counterexample {
                     inputs: input,
                     expected,
@@ -162,7 +199,7 @@ pub fn compare(source: &Source, wasm: &Wasm, random: u32, seed: u64) -> Result<C
                 break;
             }
             Err(error) => {
-                check.status = "runtime_error";
+                check.status = CheckStatus::RuntimeError;
                 check.counterexample = Some(Counterexample {
                     inputs: input,
                     expected,
@@ -200,7 +237,7 @@ pub fn generated(count: u32, seed: u64) -> Vec<(String, String)> {
 /// Harness outcome is separate from compilation success and its saved report.
 #[derive(Serialize)]
 pub struct Evaluation {
-    pub status: String,
+    pub status: EvaluationStatus,
     pub compilation: crate::compile::Report,
     pub check: Option<Check>,
     pub error: Option<String>,
@@ -214,12 +251,12 @@ pub fn evaluate(
     seed: u64,
 ) -> Evaluation {
     let mut result = Evaluation {
-        status: compilation.status.clone(),
+        status: EvaluationStatus::Compilation(compilation.status),
         compilation,
         check: None,
         error: None,
     };
-    if result.status != "compiled" {
+    if result.compilation.status != crate::compile::Status::Compiled {
         return result;
     }
     match (|| -> Result<Check> {
@@ -227,11 +264,11 @@ pub fn evaluate(
         compare(source, &wasm, cases, seed)
     })() {
         Ok(check) => {
-            result.status = check.status.into();
+            result.status = EvaluationStatus::Check(check.status);
             result.check = Some(check);
         }
         Err(error) => {
-            result.status = "check_error".into();
+            result.status = EvaluationStatus::Check(CheckStatus::CheckError);
             result.error = Some(format!("{error:#}"));
         }
     }
@@ -242,12 +279,50 @@ pub fn evaluate(
 mod tests {
     use super::*;
     #[test]
+    fn typed_statuses_preserve_flat_report_values() {
+        use crate::{compile::Status, model::StopReason};
+        for status in [
+            Status::Compiled,
+            Status::GenerationError,
+            Status::TokenLimit,
+            Status::InvalidOutput,
+            Status::InvalidWasm,
+        ] {
+            let expected = serde_json::json!(status.as_str());
+            assert_eq!(serde_json::to_value(status).unwrap(), expected);
+            assert_eq!(
+                serde_json::to_value(EvaluationStatus::Compilation(status)).unwrap(),
+                expected
+            );
+        }
+        for status in [
+            CheckStatus::Passed,
+            CheckStatus::Mismatch,
+            CheckStatus::RuntimeError,
+            CheckStatus::CheckError,
+        ] {
+            assert_eq!(
+                serde_json::to_value(EvaluationStatus::Check(status)).unwrap(),
+                serde_json::json!(status.as_str())
+            );
+        }
+        assert_eq!(serde_json::to_value(StopReason::Eos).unwrap(), "eos");
+        assert_eq!(
+            serde_json::to_value(StopReason::TokenLimit).unwrap(),
+            "token_limit"
+        );
+    }
+
+    #[test]
     fn differential_check_catches_signed_comparisons() {
         let source = crate::source::parse(
             "uint32_t f(uint32_t x, uint32_t y) { if (x > y) { return x; } return y; }",
         )
         .unwrap();
-        for (op, status) in [("gt_u", "passed"), ("gt_s", "mismatch")] {
+        for (op, status) in [
+            ("gt_u", CheckStatus::Passed),
+            ("gt_s", CheckStatus::Mismatch),
+        ] {
             let bytes = wat::parse_str(format!("(module (func (export \"f\") (param i32 i32) (result i32) local.get 0 local.get 1 i32.{op} if (result i32) local.get 0 else local.get 1 end))")).unwrap();
             let check = compare(&source, &Wasm::new(&bytes, "f").unwrap(), 32, 1).unwrap();
             assert_eq!(check.status, status);

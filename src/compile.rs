@@ -1,5 +1,5 @@
 use crate::{
-    model::{self, Compiler, Generation, Settings},
+    model::{self, Compiler, Generation, Settings, StopReason},
     source,
     wasm::Wasm,
 };
@@ -14,6 +14,41 @@ use std::{
 pub const MAX_ATTEMPTS: u32 = 5;
 pub const DEFAULT_ATTEMPTS: u32 = MAX_ATTEMPTS;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Status {
+    Compiled,
+    GenerationError,
+    TokenLimit,
+    InvalidOutput,
+    InvalidWasm,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compiled => "compiled",
+            Self::GenerationError => "generation_error",
+            Self::TokenLimit => "token_limit",
+            Self::InvalidOutput => "invalid_output",
+            Self::InvalidWasm => "invalid_wasm",
+        }
+    }
+
+    fn retryable(self) -> bool {
+        match self {
+            Self::InvalidOutput | Self::InvalidWasm | Self::TokenLimit => true,
+            Self::Compiled | Self::GenerationError => false,
+        }
+    }
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Serialize)]
 pub struct Report {
     schema_version: u32,
@@ -26,7 +61,7 @@ pub struct Report {
     settings: Settings,
     model_load_seconds: f64,
     compilation_seconds: f64,
-    pub status: String,
+    pub status: Status,
     error: Option<String>,
     wasm_sha256: Option<String>,
     max_attempts: u32,
@@ -38,14 +73,10 @@ pub struct Report {
 struct Attempt {
     number: u32,
     input: String,
-    status: String,
+    status: Status,
     error: Option<String>,
     generation: Option<Generation>,
     seconds: f64,
-}
-
-pub fn compile_one(compiler: &Compiler, source: &source::Source, output: &Path) -> Result<Report> {
-    compile_with_options(compiler, source, output, DEFAULT_ATTEMPTS)
 }
 
 pub fn compile_with_options(
@@ -90,6 +121,9 @@ pub fn compile_with_options(
         compiler.generate(input)
     })?;
     let last = attempts.last().unwrap();
+    if let Some(generation) = &last.generation {
+        fs::write(output.with_extension("raw.txt"), &generation.raw)?;
+    }
     let mut report = Report {
         schema_version: 7,
         compiler_version: env!("CARGO_PKG_VERSION"),
@@ -101,16 +135,13 @@ pub fn compile_with_options(
         settings: compiler.settings.clone(),
         model_load_seconds: compiler.load_seconds,
         compilation_seconds: 0.0,
-        status: last.status.clone(),
+        status: last.status,
         error: last.error.clone(),
         wasm_sha256: None,
         max_attempts,
         attempt_directory,
         attempts,
     };
-    if let Some(generation) = &report.attempts.last().unwrap().generation {
-        fs::write(output.with_extension("raw.txt"), &generation.raw)?;
-    }
     if let Some(path) = wat_path {
         fs::copy(path, output.with_extension("wat"))?;
     }
@@ -119,14 +150,9 @@ pub fn compile_with_options(
         report.wasm_sha256 = Some(model::digest(&bytes));
     }
     report.compilation_seconds = start.elapsed().as_secs_f64();
-    fs::write(
-        output.with_extension("report.json"),
-        serde_json::to_string_pretty(&report)?,
-    )?;
-    fs::write(
-        report.attempt_directory.join("report.json"),
-        serde_json::to_string_pretty(&report)?,
-    )?;
+    let json = serde_json::to_string_pretty(&report)?;
+    fs::write(output.with_extension("report.json"), &json)?;
+    fs::write(report.attempt_directory.join("report.json"), &json)?;
     eprintln!(
         "{}: {} ({} attempts, {:.2}s)",
         source.name,
@@ -192,7 +218,7 @@ fn wat_loop(
         let mut attempt = Attempt {
             number,
             input: input.clone(),
-            status: "generation_error".into(),
+            status: Status::GenerationError,
             error: None,
             generation: None,
             seconds: 0.0,
@@ -207,21 +233,21 @@ fn wat_loop(
             if let Some(answer) = &generation.answer {
                 fs::write(prefix.with_extension("answer.txt"), answer)?;
             }
-            attempt.status = "token_limit".into();
+            attempt.status = Status::TokenLimit;
             ensure!(
-                generation.stop == "eos",
+                generation.stop == StopReason::Eos,
                 "response reached its output token limit; return a complete, concise WAT module within the same budget"
             );
-            attempt.status = "invalid_output".into();
+            attempt.status = Status::InvalidOutput;
             let wat = extract_wat(generation.final_text()?)?;
             let path = prefix.with_extension("wat");
             fs::write(&path, &wat)?;
             wat_path = Some(path);
             let bytes = wat::parse_str(&wat).context("assembling generated WAT")?;
-            attempt.status = "invalid_wasm".into();
+            attempt.status = Status::InvalidWasm;
             Wasm::new(&bytes, &source.name)?;
             fs::write(prefix.with_extension("wasm"), &bytes)?;
-            attempt.status = "compiled".into();
+            attempt.status = Status::Compiled;
             Ok(bytes)
         })();
         attempt.seconds = start.elapsed().as_secs_f64();
@@ -236,11 +262,7 @@ fn wat_loop(
             "{}: attempt {number}/{max_attempts}: {}",
             source.name, attempt.status
         );
-        let retry = matches!(
-            attempt.status.as_str(),
-            "invalid_output" | "invalid_wasm" | "token_limit"
-        );
-        input = feedback(&source.canonical, &attempt);
+        let retry = attempt.status.retryable();
         attempts.push(attempt);
         if let Ok(bytes) = result {
             return Ok(LoopOutput {
@@ -249,9 +271,10 @@ fn wat_loop(
                 wat_path,
             });
         }
-        if !retry {
+        if !retry || number == max_attempts {
             break;
         }
+        input = feedback(&source.canonical, attempts.last().unwrap());
     }
     Ok(LoopOutput {
         attempts,
@@ -280,7 +303,7 @@ mod tests {
             prompt_tokens: 0,
             output_tokens: 0,
             seconds: 0.0,
-            stop: "eos",
+            stop: StopReason::Eos,
         }
     }
     const VALID: &str = "(module (func (export \"f\") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add))";
@@ -336,7 +359,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(attempts.len(), 1);
-        assert_eq!(attempts[0].status, "generation_error");
+        assert_eq!(attempts[0].status, Status::GenerationError);
         assert!(bytes.is_none());
     }
 

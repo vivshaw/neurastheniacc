@@ -81,7 +81,10 @@ fn main() -> Result<()> {
             let wasm = wasm::Wasm::new(&fs::read(wasm)?, &source.name)?;
             let report = eval::compare(&source, &wasm, *cases, *seed)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
-            ensure!(report.status == "passed", "differential check failed");
+            ensure!(
+                report.status == eval::CheckStatus::Passed,
+                "differential check failed"
+            );
         }
         Commands::Bench {
             model,
@@ -130,12 +133,16 @@ fn main() -> Result<()> {
                         .as_secs()
                 ))
             });
-            let prompt = prompt.as_ref().map(fs::read_to_string).transpose()?;
+            let prompt = prompt
+                .as_ref()
+                .map(fs::read_to_string)
+                .transpose()?
+                .unwrap_or_else(|| neurastheniacc::model::DEFAULT_PROMPT.into());
             if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
                 fs::create_dir_all(parent)?;
             }
             fs::create_dir(&output).context("benchmark output must be a new directory")?;
-            let mut compiler = match model.load() {
+            let compiler = match model.load_with_prompt(prompt.clone()) {
                 Ok(compiler) => compiler,
                 Err(error) => {
                     // Only remove our empty reservation, never contents from another process.
@@ -143,11 +150,8 @@ fn main() -> Result<()> {
                     return Err(error);
                 }
             };
-            if let Some(prompt) = prompt {
-                compiler.prompt = prompt;
-            }
             // Experiment metadata belongs to the benchmark, once per corpus run.
-            fs::write(output.join("system.prompt.txt"), &compiler.prompt)?;
+            fs::write(output.join("system.prompt.txt"), &prompt)?;
             let mut counts = BTreeMap::<String, usize>::new();
             let mut reports = Vec::new();
             let start = Instant::now();
@@ -162,7 +166,7 @@ fn main() -> Result<()> {
                     serde_json::to_string_pretty(&report)?,
                 )?;
                 eprintln!("{}: {}", source.name, report.status);
-                *counts.entry(report.status.clone()).or_default() += 1;
+                *counts.entry(report.status.to_string()).or_default() += 1;
                 reports.push(report);
             }
             let clang_version = std::process::Command::new("clang")

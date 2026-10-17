@@ -1,4 +1,7 @@
 //! A rejecting front end, not a code generator. Only this validated C reaches Clang.
+//! Unsigned arithmetic and bounded shifts avoid undefined behavior in the supported
+//! subset, so the optimized Clang oracle can meaningfully check model output.
+//! Additional exclusions keep the language small; not every rejected construct is undefined.
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::HashSet;
 
