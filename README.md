@@ -138,10 +138,6 @@ cargo build --release --locked --bin neurastheniacc-bench
 ./target/release/neurastheniacc-bench bench --model low --offline \
   --generated 24 --seed 20261014 --out-dir runs/my-baseline
 
-# Compare prompts while preserving the original result.
-./target/release/neurastheniacc-bench bench --model low --attempts 1 --offline --prompt prompts/v1.txt \
-  --generated 8 --out-dir runs/original-prompt
-
 # Reproduce the one-shot v4 corpus with Qwen3.8-27B.
 ./target/release/neurastheniacc-bench bench \
   --model high --attempts 1 \
@@ -150,7 +146,6 @@ cargo build --release --locked --bin neurastheniacc-bench
 # Enable thinking for C → WAT, with up to five attempts.
 ./target/release/neurastheniacc-bench bench --model high --offline \
   --qwen-thinking --context 32768 --max-tokens 8192 \
-  --prompt prompts/v4.txt \
   --attempts 5 --generated 24 --cases 1000 --seed 20261014 \
   --out-dir runs/c-to-wat-thinking
 ```
@@ -183,7 +178,7 @@ The eight fixed fixtures exercise addition, unsigned comparison, overflow, shift
 
 The compiler uses its bundled system prompt and writes no prompt copies or prompt hashes. The benchmark alone supports `bench --prompt` for prompt-tuning experiments and saves one `system.prompt.txt` per corpus run.
 
-The original demo was used to develop prompts v1–v4. Keep these versions, and keep later prompt tuning separate from evaluation sets. DSPy could optimize the system prompt later through `bench --prompt`; it is not a runtime dependency.
+The bundled prompt is `prompts/compiler.txt`. Historical benchmark references to v4 refer to this same prompt text. Git history preserves earlier versions. Keep prompt tuning separate from evaluation sets; `bench --prompt` can select an experimental prompt.
 
 ## Development
 
@@ -204,7 +199,7 @@ The tests require Clang but no model or network. They check front-end rejection,
 - `src/main.rs`: compiler CLI (`fetch`, `compile`).
 - `src/bin/neurastheniacc-bench.rs`: execution and evaluation CLI (`run`, `check`, `bench`).
 - `src/cli.rs`: shared model options; `src/lib.rs`: shared library entry point.
-- `prompts/`: versioned prompts.
+- `prompts/compiler.txt`: the bundled C-to-WAT prompt.
 - `fixtures/eval/`: fixed smoke corpus.
 
 `Cargo.lock` pins Rust dependencies, including the bundled llama.cpp revision supplied by `llama-cpp-2`. No SMT solver, DSPy service, or remote inference is involved.
