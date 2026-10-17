@@ -58,7 +58,6 @@ pub struct Report {
     platform: String,
     model_sha256: String,
     source_sha256: String,
-    source: String,
     export: String,
     settings: Settings,
     model_load_seconds: f64,
@@ -67,13 +66,14 @@ pub struct Report {
     pub error: Option<String>,
     wasm_sha256: Option<String>,
     max_attempts: u32,
-    attempt_directory: Option<PathBuf>,
-    attempts: Vec<Attempt>,
+    attempt_count: usize,
+    /// Paths relative to the program directory; empty when recording is disabled.
+    attempts: Vec<PathBuf>,
 }
 
 impl Report {
     pub fn attempt_count(&self) -> usize {
-        self.attempts.len()
+        self.attempt_count
     }
 
     pub fn compilation_seconds(&self) -> f64 {
@@ -84,7 +84,6 @@ impl Report {
 #[derive(Serialize)]
 struct Attempt {
     number: u32,
-    input: String,
     status: Status,
     error: Option<String>,
     generation: Option<Generation>,
@@ -95,8 +94,6 @@ struct Attempt {
 pub struct Artifacts {
     pub wasm: PathBuf,
     pub wat: PathBuf,
-    pub raw: PathBuf,
-    pub report: PathBuf,
 }
 
 impl Artifacts {
@@ -104,8 +101,6 @@ impl Artifacts {
         Self {
             wasm: output.with_extension("wasm"),
             wat: output.with_extension("wat"),
-            raw: output.with_extension("raw.txt"),
-            report: output.with_extension("report.json"),
         }
     }
 
@@ -175,17 +170,11 @@ pub fn compile(
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
-    // Preserve every invocation's history, including when the output name is reused.
+    // Benchmark programs each get a fresh directory; never mix attempt histories.
     let attempt_directory = if options.record {
-        Some(
-            tempfile::Builder::new()
-                .prefix(&format!(
-                    "{}.attempts-",
-                    output.file_stem().unwrap().to_string_lossy()
-                ))
-                .tempdir_in(parent)?
-                .keep(),
-        )
+        let directory = parent.join("attempts");
+        fs::create_dir(&directory)?;
+        Some(directory)
     } else {
         None
     };
@@ -193,13 +182,6 @@ pub fn compile(
     for artifact in artifacts.iter() {
         if artifact.exists() {
             fs::remove_file(artifact)?;
-        }
-    }
-    if options.record {
-        for path in [&artifacts.raw, &artifacts.report] {
-            if path.exists() {
-                fs::remove_file(path)?;
-            }
         }
     }
     let start = Instant::now();
@@ -215,17 +197,11 @@ pub fn compile(
         |input| compiler.generate(input),
     )?;
     let last = attempts.last().unwrap();
-    if options.record
-        && let Some(generation) = &last.generation
-    {
-        artifact::write(&artifacts.raw, &generation.raw)?;
-    }
     let mut report = Report {
         compiler_version: env!("CARGO_PKG_VERSION"),
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         model_sha256: compiler.model_sha256().to_owned(),
         source_sha256: model::digest(source.canonical().as_bytes()),
-        source: source.canonical().to_owned(),
         export: source.name().to_owned(),
         settings: compiler.settings().clone(),
         model_load_seconds: compiler.load_seconds(),
@@ -234,8 +210,19 @@ pub fn compile(
         error: last.error.clone(),
         wasm_sha256: None,
         max_attempts,
-        attempt_directory,
-        attempts,
+        attempt_count: attempts.len(),
+        attempts: if options.record {
+            attempts
+                .iter()
+                .map(|attempt| {
+                    PathBuf::from("attempts")
+                        .join(attempt.number.to_string())
+                        .join("report.json")
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
     };
     if let Some(wat) = wat {
         artifact::write(&artifacts.wat, wat)?;
@@ -245,17 +232,12 @@ pub fn compile(
         report.wasm_sha256 = Some(model::digest(bytes));
     }
     report.compilation_seconds = start.elapsed().as_secs_f64();
-    if let Some(directory) = &report.attempt_directory {
-        let json = serde_json::to_string_pretty(&report)?;
-        artifact::write(&artifacts.report, &json)?;
-        artifact::write(directory.join("report.json"), &json)?;
-    }
     if options.verbose {
         eprintln!(
             "{}: {} ({} attempts, {:.2}s)",
             source.name(),
             report.status,
-            report.attempts.len(),
+            report.attempt_count(),
             report.compilation_seconds
         );
     }
@@ -405,9 +387,10 @@ fn wat_loop(
     let mut wat = None;
     let mut input = source.canonical().to_owned();
     for number in 1..=max_attempts {
-        let prefix = directory.map(|directory| directory.join(format!("attempt-{number}")));
+        let prefix = directory.map(|directory| directory.join(number.to_string()));
         if let Some(prefix) = &prefix {
-            artifact::write(prefix.with_extension("input.txt"), &input)?;
+            fs::create_dir(prefix)?;
+            artifact::write(prefix.join("input.txt"), &input)?;
         }
         let start = Instant::now();
         let output = produce_attempt(source, &input, &mut generate);
@@ -415,32 +398,20 @@ fn wat_loop(
         if let Some(prefix) = &prefix
             && let Some(generation) = &output.generation
         {
-            artifact::write(prefix.with_extension("raw.txt"), &generation.raw)?;
-            if let Some(reasoning) = &generation.reasoning {
-                artifact::write(prefix.with_extension("reasoning.txt"), reasoning)?;
-            }
-            if let Some(answer) = &generation.answer {
-                artifact::write(prefix.with_extension("answer.txt"), answer)?;
-            }
+            artifact::write(prefix.join("raw.txt"), &generation.raw)?;
         }
         if let Some(prefix) = &prefix
             && let Some(wat) = &output.wat
         {
-            artifact::write(prefix.with_extension("wat"), wat)?;
+            artifact::write(prefix.join("output.wat"), wat)?;
         }
         wat = output.wat;
         let (status, error, bytes) = match output.outcome {
-            Outcome::Compiled(bytes) => {
-                if let Some(prefix) = &prefix {
-                    artifact::write(prefix.with_extension("wasm"), &bytes)?;
-                }
-                (Status::Compiled, None, Some(bytes))
-            }
+            Outcome::Compiled(bytes) => (Status::Compiled, None, Some(bytes)),
             Outcome::Rejected { status, error } => (status, Some(error), None),
         };
         let attempt = Attempt {
             number,
-            input: input.clone(),
             status,
             error,
             generation: output.generation,
@@ -448,7 +419,7 @@ fn wat_loop(
         };
         if let Some(prefix) = &prefix {
             artifact::write(
-                prefix.with_extension("report.json"),
+                prefix.join("report.json"),
                 serde_json::to_string_pretty(&attempt)?,
             )?;
         }
@@ -567,8 +538,28 @@ mod tests {
         );
         assert_eq!(attempts.len(), 3);
         assert!(bytes.is_some());
-        assert!(dir.path().join("attempt-1.raw.txt").exists());
-        assert!(dir.path().join("attempt-3.wasm").exists());
+        assert!(dir.path().join("1/raw.txt").exists());
+        assert!(dir.path().join("3/output.wat").exists());
+        let report: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("1/report.json")).unwrap())
+                .unwrap();
+        assert_eq!(report["status"], "invalid_wat");
+        assert!(report["error"].as_str().unwrap().contains("assembling"));
+        assert!(report.get("input").is_none());
+        let generation = report["generation"].as_object().unwrap();
+        assert_eq!(generation.len(), 4);
+        assert_eq!(generation["stop"], "eos");
+        assert!(generation.contains_key("prompt_tokens"));
+        assert!(generation.contains_key("output_tokens"));
+        assert!(generation.contains_key("seconds"));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("1/raw.txt")).unwrap(),
+            "(module"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("1/input.txt")).unwrap(),
+            src.canonical()
+        );
     }
 
     #[test]
@@ -604,8 +595,8 @@ mod tests {
                 .map(|a| a.status)
                 .collect::<Vec<_>>()
         );
-        assert!(dir.path().join("attempt-1.report.json").exists());
-        assert!(dir.path().join("attempt-2.wasm").exists());
+        assert!(dir.path().join("1/report.json").exists());
+        assert!(dir.path().join("2/output.wat").exists());
         let failed = wat_loop(&source(), 1, None, false, |_| Ok(generation("bad"))).unwrap();
         assert_eq!(failed.attempts[0].status, Status::InvalidOutput);
         assert!(failed.bytes.is_none());
@@ -651,8 +642,12 @@ mod tests {
             .unwrap();
             assert_eq!(result.attempts[0].status, expected);
             assert_eq!(result.attempts[1].status, Status::Compiled);
+            let metadata = fs::read_to_string(dir.path().join("1/report.json")).unwrap();
+            assert!(!metadata.contains("PRIVATE_REASONING"));
+            assert!(!dir.path().join("1/reasoning.txt").exists());
+            assert!(!dir.path().join("1/answer.txt").exists());
             assert_eq!(
-                fs::read_to_string(dir.path().join("attempt-1.raw.txt")).unwrap(),
+                fs::read_to_string(dir.path().join("1/raw.txt")).unwrap(),
                 raw
             );
         }
@@ -660,8 +655,8 @@ mod tests {
 
     #[test]
     fn respects_attempt_limit_and_does_not_retry_infrastructure_errors() {
-        let dir = tempfile::tempdir().unwrap();
         for limit in [1, 5] {
+            let dir = tempfile::tempdir().unwrap();
             let LoopOutput {
                 attempts, bytes, ..
             } = wat_loop(&source(), limit, Some(dir.path()), false, |_| {
@@ -673,7 +668,7 @@ mod tests {
         }
         let LoopOutput {
             attempts, bytes, ..
-        } = wat_loop(&source(), 5, Some(dir.path()), false, |_| {
+        } = wat_loop(&source(), 5, None, false, |_| {
             anyhow::bail!("inference unavailable")
         })
         .unwrap();
@@ -691,13 +686,10 @@ mod tests {
             Ok(generation(if calls == 1 { "(module" } else { "not WAT" }))
         })
         .unwrap();
-        assert!(dir.path().join("attempt-1.wat").exists());
+        assert!(dir.path().join("1/output.wat").exists());
         assert!(result.wat.is_none());
         assert!(result.bytes.is_none());
-        let result = wat_loop(&source(), 1, Some(dir.path()), false, |_| {
-            Ok(generation(VALID))
-        })
-        .unwrap();
+        let result = wat_loop(&source(), 1, None, false, |_| Ok(generation(VALID))).unwrap();
         assert_eq!(result.wat.unwrap(), VALID);
     }
 

@@ -36,10 +36,6 @@ impl ModelOptions {
     }
 
     pub fn load(&self) -> Result<Generator> {
-        self.load_with_prompt(model::DEFAULT_PROMPT.into())
-    }
-
-    pub fn load_with_prompt(&self, prompt: String) -> Result<Generator> {
         let settings = Settings {
             context: self.context,
             max_tokens: self.max_tokens,
@@ -51,7 +47,7 @@ impl ModelOptions {
         settings.validate()?;
         let (path, sha) = self.resolve()?;
         eprintln!("Loading {} (in-process)…", path.display());
-        Generator::load(&path, sha, settings, prompt)
+        Generator::load(&path, sha, settings)
     }
 
     fn chat_mode(&self) -> ChatMode {

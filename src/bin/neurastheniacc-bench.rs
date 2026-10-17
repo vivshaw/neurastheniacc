@@ -41,9 +41,6 @@ enum Commands {
     Bench {
         #[command(flatten)]
         model: ModelOptions,
-        /// Override the system prompt for a prompt-tuning experiment.
-        #[arg(long)]
-        prompt: Option<PathBuf>,
         #[arg(long, default_value = "fixtures/eval")]
         corpus: PathBuf,
         /// Compiler generation budget per program; 1 reproduces one-shot behavior.
@@ -56,10 +53,19 @@ enum Commands {
         cases: u32,
         #[arg(long, default_value_t = 1)]
         seed: u64,
-        /// Must be a new directory; defaults to runs/<Unix timestamp>.
+        /// Must be a new directory; defaults to benchmarks/<Unix timestamp>.
         #[arg(long)]
         out_dir: Option<PathBuf>,
     },
+}
+
+#[derive(serde::Serialize)]
+struct FixtureSummary {
+    name: String,
+    status: eval::EvaluationStatus,
+    attempts: usize,
+    compilation_seconds: f64,
+    report: String,
 }
 
 fn markdown_cell(text: &str) -> String {
@@ -68,15 +74,6 @@ fn markdown_cell(text: &str) -> String {
         .replace('>', "&gt;")
         .replace('|', "\\|")
         .replace(['\r', '\n'], " ")
-}
-
-fn cli_prompt_label(command: &Commands) -> String {
-    match command {
-        Commands::Bench {
-            prompt: Some(path), ..
-        } => path.display().to_string(),
-        _ => "bundled default".into(),
-    }
 }
 
 fn fixture_row(name: &str, report: &eval::Evaluation) -> String {
@@ -143,7 +140,6 @@ fn main() -> Result<()> {
         }
         Commands::Bench {
             model,
-            prompt,
             corpus,
             generated,
             attempts,
@@ -181,23 +177,18 @@ fn main() -> Result<()> {
             );
             let output = out_dir.clone().unwrap_or_else(|| {
                 PathBuf::from(format!(
-                    "runs/{}",
+                    "benchmarks/{}",
                     SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
                         .as_secs()
                 ))
             });
-            let prompt = prompt
-                .as_ref()
-                .map(fs::read_to_string)
-                .transpose()?
-                .unwrap_or_else(|| neurastheniacc::model::DEFAULT_PROMPT.into());
             if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
                 fs::create_dir_all(parent)?;
             }
             fs::create_dir(&output).context("benchmark output must be a new directory")?;
-            let generator = match model.load_with_prompt(prompt.clone()) {
+            let generator = match model.load() {
                 Ok(generator) => generator,
                 Err(error) => {
                     // Only remove our empty reservation, never contents from another process.
@@ -205,15 +196,15 @@ fn main() -> Result<()> {
                     return Err(error);
                 }
             };
-            // Experiment metadata belongs to the benchmark, once per corpus run.
-            fs::write(output.join("system.prompt.txt"), &prompt)?;
             let mut counts = BTreeMap::<String, usize>::new();
-            let mut reports = Vec::new();
+            let mut fixtures = Vec::new();
             let mut rows = Vec::new();
             let start = Instant::now();
             for (name, source) in sources {
-                fs::write(output.join(format!("{name}.c")), source.canonical())?;
-                let artifact = output.join(format!("{name}.wasm"));
+                let program_directory = output.join(&name);
+                fs::create_dir(&program_directory)?;
+                fs::write(program_directory.join("source.c"), source.canonical())?;
+                let artifact = program_directory.join("output.wasm");
                 let compilation = compile::compile(
                     &generator,
                     &source,
@@ -226,13 +217,19 @@ fn main() -> Result<()> {
                 )?;
                 let report = eval::evaluate(compilation, &source, *cases, *seed);
                 artifact::write(
-                    artifact.with_extension("check.json"),
+                    program_directory.join("check.json"),
                     serde_json::to_string_pretty(&report)?,
                 )?;
                 eprintln!("{}: {}", source.name(), report.status);
                 *counts.entry(report.status.to_string()).or_default() += 1;
                 rows.push(fixture_row(&name, &report));
-                reports.push(report);
+                fixtures.push(FixtureSummary {
+                    report: format!("{name}/check.json"),
+                    name,
+                    status: report.status,
+                    attempts: report.compilation.attempt_count(),
+                    compilation_seconds: report.compilation.compilation_seconds(),
+                });
             }
             let clang_version = std::process::Command::new("clang")
                 .arg("--version")
@@ -240,12 +237,14 @@ fn main() -> Result<()> {
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
             let summary = serde_json::json!({
-                "max_attempts": attempts, "programs": reports.len(), "counts": counts,
+                "max_attempts": attempts, "programs": fixtures.len(), "counts": counts,
                 "seed": seed, "random_inputs_per_program": cases,
                 "edge_inputs_per_program": eval::inputs(0, *seed).len(),
                 "benchmark_seconds_excluding_model_load": start.elapsed().as_secs_f64(),
                 "clang_version": clang_version,
-                "reports": reports,
+                "model": model.selection(),
+                "settings": generator.settings(),
+                "fixtures": fixtures,
             });
             artifact::write(
                 output.join("summary.json"),
@@ -257,13 +256,11 @@ fn main() -> Result<()> {
                 .map(|(status, count)| format!("{count} {status}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let prompt_name = cli_prompt_label(&cli.command);
             let markdown = format!(
-                "# Benchmark results\n\n**{}**. Programs: {}.\n\nModel: {}. Prompt: {}. Greedy decoding; chat mode: {:?}; context: {}; output budget: {}; maximum attempts: {}; seed: {}.\n\nEach passing fixture completed {} edge inputs plus {} random inputs against Clang. Checking stops at the first mismatch or runtime error. Compilation time excludes model loading and behavioral checking.\n\n| Fixture | Status | Attempts | Compile seconds | Failure detail |\n| --- | --- | ---: | ---: | --- |\n{}\n\n[Detailed results](summary.json). Per-fixture attempt histories are saved alongside this report.\n",
+                "# Benchmark results\n\n**{}**. Programs: {}.\n\nModel: {}. Greedy decoding; chat mode: {:?}; context: {}; output budget: {}; maximum attempts: {}; seed: {}.\n\nEach passing fixture completed {} edge inputs plus {} random inputs against Clang. Checking stops at the first mismatch or runtime error. Compilation time excludes model loading and behavioral checking.\n\n| Fixture | Status | Attempts | Compile seconds | Failure detail |\n| --- | --- | ---: | ---: | --- |\n{}\n\n[Machine-readable summary](summary.json). Each fixture entry links to its detailed `check.json` report; each program directory contains its attempt history.\n",
                 counts_text,
-                reports.len(),
+                fixtures.len(),
                 markdown_cell(model.selection()),
-                markdown_cell(&prompt_name),
                 settings.chat_mode,
                 settings.context,
                 settings.max_tokens,
@@ -276,12 +273,12 @@ fn main() -> Result<()> {
             artifact::write(output.join("summary.md"), markdown)?;
             println!(
                 "{} programs: {}\nReports: {}",
-                reports.len(),
+                fixtures.len(),
                 serde_json::to_string(&counts)?,
                 output.display()
             );
             ensure!(
-                reports.iter().all(|report| report.status
+                fixtures.iter().all(|fixture| fixture.status
                     == eval::EvaluationStatus::Check(eval::CheckStatus::Passed)),
                 "benchmark recorded failures (see summary.json)"
             );

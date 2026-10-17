@@ -191,10 +191,11 @@ pub enum StopReason {
 
 #[derive(Clone, Serialize)]
 pub struct Generation {
+    #[serde(skip_serializing)]
     pub raw: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub reasoning: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub answer: Option<String>,
     pub prompt_tokens: usize,
     pub output_tokens: usize,
@@ -222,7 +223,6 @@ pub struct Generator {
     settings: Settings,
     model_sha256: String,
     load_seconds: f64,
-    prompt: String,
 }
 
 impl Generator {
@@ -238,12 +238,7 @@ impl Generator {
         self.load_seconds
     }
 
-    pub fn load(
-        path: &Path,
-        model_sha256: String,
-        settings: Settings,
-        prompt: String,
-    ) -> Result<Self> {
+    pub fn load(path: &Path, model_sha256: String, settings: Settings) -> Result<Self> {
         settings.validate()?;
         llama_cpp_2::send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
         let start = Instant::now();
@@ -260,12 +255,11 @@ impl Generator {
             settings,
             model_sha256,
             load_seconds: start.elapsed().as_secs_f64(),
-            prompt,
         })
     }
 
     pub fn generate(&self, source: &str) -> Result<Generation> {
-        let system = &self.prompt;
+        let system = DEFAULT_PROMPT;
         let start = Instant::now();
         let template = self
             .model
