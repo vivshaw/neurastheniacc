@@ -11,7 +11,8 @@ use std::{
     time::Instant,
 };
 
-pub const DEFAULT_ATTEMPTS: u32 = 5;
+pub const MAX_ATTEMPTS: u32 = 5;
+pub const DEFAULT_ATTEMPTS: u32 = MAX_ATTEMPTS;
 
 #[derive(Serialize)]
 pub struct Report {
@@ -19,7 +20,6 @@ pub struct Report {
     compiler_version: &'static str,
     platform: String,
     model_sha256: String,
-    prompt_sha256: String,
     source_sha256: String,
     source: String,
     export: String,
@@ -28,7 +28,6 @@ pub struct Report {
     compilation_seconds: f64,
     pub status: String,
     error: Option<String>,
-    generation: Option<Generation>,
     wasm_sha256: Option<String>,
     max_attempts: u32,
     attempt_directory: PathBuf,
@@ -56,8 +55,8 @@ pub fn compile_with_options(
     max_attempts: u32,
 ) -> Result<Report> {
     ensure!(
-        (1..=5).contains(&max_attempts),
-        "attempts must be between 1 and 5"
+        (1..=MAX_ATTEMPTS).contains(&max_attempts),
+        "attempts must be between 1 and {MAX_ATTEMPTS}"
     );
     ensure!(
         output.extension().is_some_and(|ext| ext == "wasm"),
@@ -82,22 +81,20 @@ pub fn compile_with_options(
             fs::remove_file(path)?;
         }
     }
-    fs::write(output.with_extension("prompt.txt"), &compiler.prompt)?;
-    fs::write(
-        attempt_directory.join("system.prompt.txt"),
-        &compiler.prompt,
-    )?;
     let start = Instant::now();
-    let (attempts, bytes) = wat_loop(source, max_attempts, &attempt_directory, |input| {
+    let LoopOutput {
+        attempts,
+        bytes,
+        wat_path,
+    } = wat_loop(source, max_attempts, &attempt_directory, |input| {
         compiler.generate(input)
     })?;
     let last = attempts.last().unwrap();
     let mut report = Report {
-        schema_version: 5,
+        schema_version: 7,
         compiler_version: env!("CARGO_PKG_VERSION"),
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         model_sha256: compiler.model_sha256.clone(),
-        prompt_sha256: model::digest(compiler.prompt.as_bytes()),
         source_sha256: model::digest(source.canonical.as_bytes()),
         source: source.canonical.clone(),
         export: source.name.clone(),
@@ -106,20 +103,16 @@ pub fn compile_with_options(
         compilation_seconds: 0.0,
         status: last.status.clone(),
         error: last.error.clone(),
-        generation: last.generation.clone(),
         wasm_sha256: None,
         max_attempts,
         attempt_directory,
         attempts,
     };
-    if let Some(generation) = &report.generation {
+    if let Some(generation) = &report.attempts.last().unwrap().generation {
         fs::write(output.with_extension("raw.txt"), &generation.raw)?;
     }
-    let last_wat = report
-        .attempt_directory
-        .join(format!("attempt-{}.wat", report.attempts.len()));
-    if last_wat.exists() {
-        fs::copy(&last_wat, output.with_extension("wat"))?;
+    if let Some(path) = wat_path {
+        fs::copy(path, output.with_extension("wat"))?;
     }
     if let Some(bytes) = bytes {
         fs::write(output, &bytes)?;
@@ -153,20 +146,46 @@ fn feedback(source: &str, attempt: &Attempt) -> String {
     )
 }
 
+/// Only remove a single Markdown wrapper. Never fix instructions or cherry-pick a module.
+pub fn extract_wat(raw: &str) -> Result<String> {
+    let text = raw.trim();
+    let text = if text.starts_with("```") {
+        let (tag, body) = text.split_once('\n').context("incomplete code fence")?;
+        ensure!(
+            ["```", "```wat", "```wasm", "```webassembly"].contains(&tag),
+            "unexpected code fence"
+        );
+        body.strip_suffix("```")
+            .context("unclosed code fence")?
+            .trim()
+    } else {
+        text
+    };
+    ensure!(
+        text.starts_with("(module"),
+        "model did not return a WAT module"
+    );
+    Ok(text.to_string())
+}
+
+struct LoopOutput {
+    attempts: Vec<Attempt>,
+    bytes: Option<Vec<u8>>,
+    wat_path: Option<PathBuf>,
+}
+
 // Keeping generation injectable lets tests exercise the actual compiler loop without a model.
 fn wat_loop(
     source: &source::Source,
     max_attempts: u32,
     directory: &Path,
     mut generate: impl FnMut(&str) -> Result<Generation>,
-) -> Result<(Vec<Attempt>, Option<Vec<u8>>)> {
-    ensure!(
-        (1..=5).contains(&max_attempts),
-        "attempts must be between 1 and 5"
-    );
+) -> Result<LoopOutput> {
     let mut attempts = Vec::new();
+    let mut wat_path = None;
     let mut input = source.canonical.clone();
     for number in 1..=max_attempts {
+        wat_path = None;
         let prefix = directory.join(format!("attempt-{number}"));
         fs::write(prefix.with_extension("input.txt"), &input)?;
         let start = Instant::now();
@@ -194,8 +213,10 @@ fn wat_loop(
                 "response reached its output token limit; return a complete, concise WAT module within the same budget"
             );
             attempt.status = "invalid_output".into();
-            let wat = model::extract_wat(generation.final_text()?)?;
-            fs::write(prefix.with_extension("wat"), &wat)?;
+            let wat = extract_wat(generation.final_text()?)?;
+            let path = prefix.with_extension("wat");
+            fs::write(&path, &wat)?;
+            wat_path = Some(path);
             let bytes = wat::parse_str(&wat).context("assembling generated WAT")?;
             attempt.status = "invalid_wasm".into();
             Wasm::new(&bytes, &source.name)?;
@@ -222,18 +243,32 @@ fn wat_loop(
         input = feedback(&source.canonical, &attempt);
         attempts.push(attempt);
         if let Ok(bytes) = result {
-            return Ok((attempts, Some(bytes)));
+            return Ok(LoopOutput {
+                attempts,
+                bytes: Some(bytes),
+                wat_path,
+            });
         }
         if !retry {
             break;
         }
     }
-    Ok((attempts, None))
+    Ok(LoopOutput {
+        attempts,
+        bytes: None,
+        wat_path,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn extraction_never_repairs_model_output() {
+        assert_eq!(extract_wat("```wat\n(module)\n```").unwrap(), "(module)");
+        assert!(extract_wat("Here is your code: (module)").is_err());
+        assert!(wat::parse_str(extract_wat("(module)\nSome explanation").unwrap()).is_err());
+    }
     fn source() -> source::Source {
         source::parse("uint32_t f(uint32_t x, uint32_t y) { return x + y; }").unwrap()
     }
@@ -242,7 +277,6 @@ mod tests {
             raw: raw.into(),
             reasoning: None,
             answer: None,
-            chat_prompt_sha256: String::new(),
             prompt_tokens: 0,
             output_tokens: 0,
             seconds: 0.0,
@@ -255,7 +289,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = source();
         let mut calls = 0;
-        let (attempts, bytes) = wat_loop(&src, 5, dir.path(), |input| {
+        let LoopOutput {
+            attempts, bytes, ..
+        } = wat_loop(&src, 5, dir.path(), |input| {
             calls += 1;
             match calls {
                 1 => {
@@ -287,12 +323,15 @@ mod tests {
     fn respects_attempt_limit_and_does_not_retry_infrastructure_errors() {
         let dir = tempfile::tempdir().unwrap();
         for limit in [1, 5] {
-            let (attempts, bytes) =
-                wat_loop(&source(), limit, dir.path(), |_| Ok(generation("bad"))).unwrap();
+            let LoopOutput {
+                attempts, bytes, ..
+            } = wat_loop(&source(), limit, dir.path(), |_| Ok(generation("bad"))).unwrap();
             assert_eq!(attempts.len(), limit as usize);
             assert!(bytes.is_none());
         }
-        let (attempts, bytes) = wat_loop(&source(), 5, dir.path(), |_| {
+        let LoopOutput {
+            attempts, bytes, ..
+        } = wat_loop(&source(), 5, dir.path(), |_| {
             anyhow::bail!("inference unavailable")
         })
         .unwrap();
@@ -300,10 +339,31 @@ mod tests {
         assert_eq!(attempts[0].status, "generation_error");
         assert!(bytes.is_none());
     }
+
+    #[test]
+    fn final_attempt_artifact_does_not_reuse_an_earlier_wat() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut calls = 0;
+        let result = wat_loop(&source(), 2, dir.path(), |_| {
+            calls += 1;
+            Ok(generation(if calls == 1 { "(module" } else { "not WAT" }))
+        })
+        .unwrap();
+        assert!(dir.path().join("attempt-1.wat").exists());
+        assert!(result.wat_path.is_none());
+        assert!(result.bytes.is_none());
+        let result = wat_loop(&source(), 1, dir.path(), |_| Ok(generation(VALID))).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(result.wat_path.unwrap()).unwrap(),
+            VALID
+        );
+    }
     #[test]
     fn valid_but_wrong_program_stops_without_semantic_feedback() {
         let dir = tempfile::tempdir().unwrap();
-        let (attempts, bytes) = wat_loop(&source(), 5, dir.path(), |_| {
+        let LoopOutput {
+            attempts, bytes, ..
+        } = wat_loop(&source(), 5, dir.path(), |_| {
             Ok(generation(
                 "(module (func (export \"f\") (param i32 i32) (result i32) i32.const 0))",
             ))

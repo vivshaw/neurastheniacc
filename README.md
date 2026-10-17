@@ -76,7 +76,7 @@ The pinned revisions and checksums live in `src/model.rs`. The cache is `$XDG_CA
 
 `--offline` fails if the selected preset is absent, without contacting the network. `--model` also accepts a local GGUF path and records its hash; it requires a chat template supported by llama.cpp. GPU acceleration requires access to the GPU, which some application sandboxes restrict. `--gpu-layers 0` explicitly selects CPU inference. The first Metal inference may also incur kernel initialization costs.
 
-Both presets automatically use Qwen's text-only chat template with `enable_thinking=false`, including its empty thinking prefix. Override this with `--qwen-thinking` to use the model's thinking format (including the cached high model's default `xhigh` effort instruction). For example, use `--qwen-thinking --context 16384 --max-tokens 8192`; reasoning and the final answer share that output budget. Thinking mode preserves the raw response and saves separate `reasoning.txt` and `answer.txt` files in each attempt directory. Only text after the closing `</think>` is passed to the WAT parser; a missing closing delimiter is rejected. The non-thinking default is unchanged. For a custom Qwen GGUF path, request this with `--qwen-no-thinking`. The setting and a hash of the complete rendered chat prompt are recorded in compilation reports. The compiler system prompt stays unchanged, and every model response is preserved. Repairs are new model responses driven by validator feedback, not edits made by the compiler.
+Both presets automatically use Qwen's text-only chat template with `enable_thinking=false`, including its empty thinking prefix. Override this with `--qwen-thinking` to use the model's thinking format (including the cached high model's default `xhigh` effort instruction). For example, use `--qwen-thinking --context 16384 --max-tokens 8192`; reasoning and the final answer share that output budget. Thinking mode preserves the raw response and saves separate `reasoning.txt` and `answer.txt` files in each attempt directory. Only text after the closing `</think>` is passed to the WAT parser; a missing closing delimiter is rejected. The non-thinking default is unchanged. For a custom Qwen GGUF path, request this with `--qwen-no-thinking`. The setting is recorded in compilation reports. The compiler system prompt stays unchanged, and every model response is preserved. Repairs are new model responses driven by validator feedback, not edits made by the compiler.
 
 The weights are the only downloaded runtime asset; there is no background process to manage. Compilation and Wasm execution do not require Clang.
 
@@ -143,12 +143,13 @@ Every candidate is checked for a correct `(i32, i32) -> i32` export. Execution f
 Outputs include:
 
 - `.raw.txt`: unmodified final model response; earlier responses live in the attempt directory.
-- `.prompt.txt`: exact system prompt.
 - `.wat`: extracted candidate, even if assembly fails.
 - `.wasm`: valid candidate, including candidates that fail differential checking.
-- `.report.json`: compilation result, every attempt and feedback input, source/model/prompt/output hashes, inference settings, token counts, stop reasons and total timing.
+- `.report.json`: compilation result (schema 7), every attempt and feedback input, source/model/output hashes, inference settings, token counts, stop reasons and total timing.
 - `.check.json`: benchmark evaluation result and counterexample, with the compilation report nested separately.
 - `summary.json`: all benchmark reports, aggregate outcomes and Clang version.
+
+Compilation reports store generations once, in `attempts[].generation`; the final response is in the last attempt. Settings record one `chat_mode`: `model_template`, `qwen_no_thinking`, or `qwen_thinking`.
 
 A benchmark exits nonzero if any program fails, **after** saving its results. Compilation reports distinguish generation errors, truncation, malformed output, invalid Wasm and successful compilation. Harness reports separately record check errors, runtime errors, mismatches and passed tests. Source and model-loading errors stop before the benchmark can run.
 
@@ -156,7 +157,9 @@ Compilation time includes inference context creation, prompt processing, generat
 
 The eight fixed fixtures exercise addition, unsigned comparison, overflow, shifts, mutation, nested branches, shadowing and complement. Generated programs use four templates with seeded constants and operators. This is a small, structured smoke corpus, not a representative sample of C and not proof of equivalence. SMT verification is deliberately deferred.
 
-The original demo was used to develop prompts v1–v4. Keep these versions, and keep later prompt tuning separate from evaluation sets. DSPy could optimize the system prompt later through `--prompt`; it is not a runtime dependency.
+The compiler uses its bundled system prompt and writes no prompt copies or prompt hashes. The benchmark alone supports `bench --prompt` for prompt-tuning experiments and saves one `system.prompt.txt` per corpus run.
+
+The original demo was used to develop prompts v1–v4. Keep these versions, and keep later prompt tuning separate from evaluation sets. DSPy could optimize the system prompt later through `bench --prompt`; it is not a runtime dependency.
 
 ## Development
 
@@ -169,7 +172,8 @@ cargo fmt --check
 The tests require Clang but no model or network. They check front-end rejection, wrapping arithmetic, unsigned comparison counterexamples, bounded Wasm execution, forbidden module features, generated source validity, cache failure modes, strict output extraction, feedback propagation, retry limits, and stopping on validation success without semantic feedback.
 
 - `src/source.rs`: rejecting C front end; no code generation.
-- `src/model.rs`: cache, checksums, embedded inference and extraction.
+- `src/model.rs`: cache, checksums and embedded inference.
+- `src/prompt.rs`: Qwen chat formatting and reasoning boundaries.
 - `src/compile.rs`: compilation pipeline, artifacts and compilation reports.
 - `src/wasm.rs`: Wasm validation and execution.
 - `src/eval.rs`: test harness, native Clang oracle, inputs and corpus generator.

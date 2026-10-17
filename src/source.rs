@@ -8,6 +8,25 @@ pub struct Source {
     pub canonical: String,
 }
 
+impl Source {
+    /// Rename only the function declaration; calls are excluded by this subset.
+    pub fn renamed(&self, new_name: &str) -> Result<String> {
+        let mut tokens = lex(&self.canonical)?;
+        ensure!(
+            tokens.get(1) == Some(&self.name),
+            "source name disagrees with declaration"
+        );
+        tokens[1] = new_name.into();
+        // Re-parse to reject invalid replacement identifiers and keep formatting local.
+        let renamed = parse(&tokens.join(" "))?;
+        ensure!(
+            renamed.name == new_name,
+            "invalid replacement function name"
+        );
+        Ok(renamed.canonical)
+    }
+}
+
 pub fn parse(input: &str) -> Result<Source> {
     ensure!(input.len() <= 32_768, "source exceeds 32 KiB");
     ensure!(
@@ -305,6 +324,21 @@ pub fn read(path: &std::path::Path) -> Result<Source> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn renaming_is_independent_of_whitespace_and_preserves_locals() {
+        let mut source =
+            super::parse("uint32_t f(uint32_t f, uint32_t y) { return f+y; }").unwrap();
+        source.canonical = "uint32_t f(uint32_t f,uint32_t y){return f+y;}".into();
+        let renamed = source.renamed("subject").unwrap();
+        assert_eq!(
+            renamed,
+            "uint32_t subject ( uint32_t f , uint32_t y ) { return f + y ; }"
+        );
+        assert!(source.renamed("bad-name").is_err());
+        source.name = "wrong".into();
+        assert!(source.renamed("subject").is_err());
+    }
+
     use super::*;
     fn wrap(body: &str) -> String {
         format!("uint32_t f(uint32_t x, uint32_t y) {{ {body} }}")

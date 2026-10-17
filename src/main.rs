@@ -25,7 +25,7 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Total generation attempts, including the initial translation.
-        #[arg(long, default_value_t = compile::DEFAULT_ATTEMPTS, value_parser = clap::value_parser!(u32).range(1..=5))]
+        #[arg(long, default_value_t = compile::DEFAULT_ATTEMPTS, value_parser = clap::value_parser!(u32).range(1..=i64::from(compile::MAX_ATTEMPTS)))]
         attempts: u32,
     },
 }
@@ -46,6 +46,7 @@ fn main() -> Result<()> {
             let output = output
                 .clone()
                 .unwrap_or_else(|| source.with_extension("wasm"));
+            // canonicalize requires an existing path; compare identities only then.
             if output.exists() {
                 ensure!(
                     fs::canonicalize(source)? != fs::canonicalize(&output)?,

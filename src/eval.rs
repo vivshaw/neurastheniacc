@@ -61,11 +61,7 @@ pub fn reference(source: &Source, cases: &[[u32; 2]]) -> Result<Vec<u32>> {
     let exe = dir.path().join("reference");
     // Separate translation units keep stdio macros and harness identifiers out of the source.
     // There are no calls in the supported subset, so renaming only the function is sufficient.
-    let subject = source.canonical.replacen(
-        &format!("uint32_t {} (", source.name),
-        "uint32_t neurastheniacc_subject (",
-        1,
-    );
+    let subject = source.renamed("neurastheniacc_subject")?;
     fs::write(&subject_path, format!("#include <stdint.h>\n{subject}\n"))?;
     let driver = r#"#include <stdint.h>
 #include <inttypes.h>

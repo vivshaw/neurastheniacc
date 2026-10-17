@@ -41,10 +41,13 @@ enum Commands {
     Bench {
         #[command(flatten)]
         model: ModelOptions,
+        /// Override the system prompt for a prompt-tuning experiment.
+        #[arg(long)]
+        prompt: Option<PathBuf>,
         #[arg(long, default_value = "fixtures/eval")]
         corpus: PathBuf,
         /// Compiler generation budget per program; 1 reproduces one-shot behavior.
-        #[arg(long, default_value_t = compile::DEFAULT_ATTEMPTS, value_parser = clap::value_parser!(u32).range(1..=5))]
+        #[arg(long, default_value_t = compile::DEFAULT_ATTEMPTS, value_parser = clap::value_parser!(u32).range(1..=i64::from(compile::MAX_ATTEMPTS)))]
         attempts: u32,
         /// Add programs from the seeded template generator.
         #[arg(long, default_value_t = 0)]
@@ -82,6 +85,7 @@ fn main() -> Result<()> {
         }
         Commands::Bench {
             model,
+            prompt,
             corpus,
             generated,
             attempts,
@@ -110,6 +114,7 @@ fn main() -> Result<()> {
                 sources.push((name, source::parse(&text)?));
             }
             ensure!(!sources.is_empty(), "empty corpus");
+            // Artifact stems (e.g. 01_add) need not match exports (e.g. add).
             let names: std::collections::HashSet<_> =
                 sources.iter().map(|(name, _)| name).collect();
             ensure!(
@@ -125,11 +130,24 @@ fn main() -> Result<()> {
                         .as_secs()
                 ))
             });
+            let prompt = prompt.as_ref().map(fs::read_to_string).transpose()?;
             if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
                 fs::create_dir_all(parent)?;
             }
             fs::create_dir(&output).context("benchmark output must be a new directory")?;
-            let compiler = model.load()?;
+            let mut compiler = match model.load() {
+                Ok(compiler) => compiler,
+                Err(error) => {
+                    // Only remove our empty reservation, never contents from another process.
+                    let _ = fs::remove_dir(&output);
+                    return Err(error);
+                }
+            };
+            if let Some(prompt) = prompt {
+                compiler.prompt = prompt;
+            }
+            // Experiment metadata belongs to the benchmark, once per corpus run.
+            fs::write(output.join("system.prompt.txt"), &compiler.prompt)?;
             let mut counts = BTreeMap::<String, usize>::new();
             let mut reports = Vec::new();
             let start = Instant::now();

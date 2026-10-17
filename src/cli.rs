@@ -1,7 +1,7 @@
-use crate::model::{self, Compiler, Settings};
+use crate::model::{self, ChatMode, Compiler, Settings};
 use anyhow::Result;
 use clap::Args;
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 #[derive(Args)]
 pub struct ModelOptions {
@@ -13,9 +13,6 @@ pub struct ModelOptions {
     /// Never download; fail if the selected model is absent from cache.
     #[arg(long, global = true)]
     offline: bool,
-    /// Override the versioned compiler system prompt.
-    #[arg(long, global = true)]
-    prompt: Option<PathBuf>,
     #[arg(long, global = true, default_value_t = 8192)]
     context: u32,
     #[arg(long, global = true, default_value_t = 1536)]
@@ -36,12 +33,8 @@ pub struct ModelOptions {
 impl ModelOptions {
     pub fn load(&self) -> Result<Compiler> {
         let (path, sha) = self.resolve()?;
-        let prompt = match &self.prompt {
-            Some(path) => fs::read_to_string(path)?,
-            None => model::DEFAULT_PROMPT.into(),
-        };
         eprintln!("Loading {} (in-process)…", path.display());
-        let compiler = Compiler::load(
+        Compiler::load(
             &path,
             sha,
             Settings {
@@ -49,15 +42,20 @@ impl ModelOptions {
                 max_tokens: self.max_tokens,
                 threads: self.threads,
                 gpu_layers: self.gpu_layers,
-                qwen_no_thinking: !self.qwen_thinking
-                    && (self.qwen_no_thinking
-                        || model::preset(&self.model)
-                            .is_some_and(|preset| preset.qwen_no_thinking)),
-                qwen_thinking: self.qwen_thinking,
+                chat_mode: self.chat_mode(),
             },
-            prompt,
-        )?;
-        Ok(compiler)
+            model::DEFAULT_PROMPT.into(),
+        )
+    }
+
+    fn chat_mode(&self) -> ChatMode {
+        if self.qwen_thinking {
+            ChatMode::QwenThinking
+        } else if self.qwen_no_thinking {
+            ChatMode::QwenNoThinking
+        } else {
+            model::preset(&self.model).map_or(ChatMode::ModelTemplate, |preset| preset.chat_mode)
+        }
     }
 
     pub fn resolve(&self) -> Result<(PathBuf, String)> {
@@ -73,5 +71,44 @@ impl ModelOptions {
             }
         }
         model::resolve(&self.model, &cache, self.offline)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        model: ModelOptions,
+    }
+
+    #[test]
+    fn resolves_presets_custom_templates_and_explicit_overrides() {
+        for (args, expected) in [
+            (vec!["test"], ChatMode::QwenNoThinking),
+            (vec!["test", "--model", "low"], ChatMode::QwenNoThinking),
+            (vec!["test", "--qwen-thinking"], ChatMode::QwenThinking),
+            (
+                vec!["test", "--model", "custom.gguf"],
+                ChatMode::ModelTemplate,
+            ),
+            (
+                vec!["test", "--model", "custom.gguf", "--qwen-no-thinking"],
+                ChatMode::QwenNoThinking,
+            ),
+            (
+                vec!["test", "--model", "custom.gguf", "--qwen-thinking"],
+                ChatMode::QwenThinking,
+            ),
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(args).unwrap().model.chat_mode(),
+                expected
+            );
+        }
+        assert!(Cli::try_parse_from(["test", "--qwen-thinking", "--qwen-no-thinking"]).is_err());
     }
 }
