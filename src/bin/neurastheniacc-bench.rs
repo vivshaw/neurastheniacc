@@ -8,9 +8,6 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-// Bump when the benchmark summary format changes.
-const SUMMARY_SCHEMA_VERSION: u32 = 4;
-
 #[derive(Parser)]
 #[command(
     version,
@@ -63,6 +60,61 @@ enum Commands {
         #[arg(long)]
         out_dir: Option<PathBuf>,
     },
+}
+
+fn markdown_cell(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('|', "\\|")
+        .replace(['\r', '\n'], " ")
+}
+
+fn cli_prompt_label(command: &Commands) -> String {
+    match command {
+        Commands::Bench {
+            prompt: Some(path), ..
+        } => path.display().to_string(),
+        _ => "bundled default".into(),
+    }
+}
+
+fn fixture_row(name: &str, report: &eval::Evaluation) -> String {
+    let detail = if let Some(counterexample) = report
+        .check
+        .as_ref()
+        .and_then(|c| c.counterexample.as_ref())
+    {
+        format!(
+            "Input {:?}: expected {}, actual {}{}",
+            counterexample.inputs,
+            counterexample.expected,
+            counterexample
+                .actual
+                .map_or_else(|| "trap".into(), |v| v.to_string()),
+            counterexample
+                .error
+                .as_ref()
+                .map_or(String::new(), |e| format!(": {e}"))
+        )
+    } else {
+        report
+            .error
+            .as_deref()
+            .or(report.compilation.error.as_deref())
+            .unwrap_or("—")
+            .to_owned()
+    };
+    let detail = detail.lines().next().unwrap_or("—");
+    let brief: String = detail.chars().take(200).collect();
+    format!(
+        "| {} | {} | {} | {:.2} | {} |",
+        markdown_cell(name),
+        report.status,
+        report.compilation.attempt_count(),
+        report.compilation.compilation_seconds(),
+        markdown_cell(&brief)
+    )
 }
 
 fn main() -> Result<()> {
@@ -157,11 +209,21 @@ fn main() -> Result<()> {
             fs::write(output.join("system.prompt.txt"), &prompt)?;
             let mut counts = BTreeMap::<String, usize>::new();
             let mut reports = Vec::new();
+            let mut rows = Vec::new();
             let start = Instant::now();
             for (name, source) in sources {
                 fs::write(output.join(format!("{name}.c")), source.canonical())?;
                 let artifact = output.join(format!("{name}.wasm"));
-                let compilation = compile::compile(&generator, &source, &artifact, *attempts)?;
+                let compilation = compile::compile(
+                    &generator,
+                    &source,
+                    &artifact,
+                    *attempts,
+                    compile::Options {
+                        verbose: true,
+                        record: true,
+                    },
+                )?;
                 let report = eval::evaluate(compilation, &source, *cases, *seed);
                 artifact::write(
                     artifact.with_extension("check.json"),
@@ -169,6 +231,7 @@ fn main() -> Result<()> {
                 )?;
                 eprintln!("{}: {}", source.name(), report.status);
                 *counts.entry(report.status.to_string()).or_default() += 1;
+                rows.push(fixture_row(&name, &report));
                 reports.push(report);
             }
             let clang_version = std::process::Command::new("clang")
@@ -177,7 +240,7 @@ fn main() -> Result<()> {
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
             let summary = serde_json::json!({
-                "schema_version": SUMMARY_SCHEMA_VERSION, "max_attempts": attempts, "programs": reports.len(), "counts": counts,
+                "max_attempts": attempts, "programs": reports.len(), "counts": counts,
                 "seed": seed, "random_inputs_per_program": cases,
                 "edge_inputs_per_program": eval::inputs(0, *seed).len(),
                 "benchmark_seconds_excluding_model_load": start.elapsed().as_secs_f64(),
@@ -188,6 +251,29 @@ fn main() -> Result<()> {
                 output.join("summary.json"),
                 serde_json::to_string_pretty(&summary)?,
             )?;
+            let settings = generator.settings();
+            let counts_text = counts
+                .iter()
+                .map(|(status, count)| format!("{count} {status}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let prompt_name = cli_prompt_label(&cli.command);
+            let markdown = format!(
+                "# Benchmark results\n\n**{}**. Programs: {}.\n\nModel: {}. Prompt: {}. Greedy decoding; chat mode: {:?}; context: {}; output budget: {}; maximum attempts: {}; seed: {}.\n\nEach passing fixture completed {} edge inputs plus {} random inputs against Clang. Checking stops at the first mismatch or runtime error. Compilation time excludes model loading and behavioral checking.\n\n| Fixture | Status | Attempts | Compile seconds | Failure detail |\n| --- | --- | ---: | ---: | --- |\n{}\n\n[Detailed results](summary.json). Per-fixture attempt histories are saved alongside this report.\n",
+                counts_text,
+                reports.len(),
+                markdown_cell(model.selection()),
+                markdown_cell(&prompt_name),
+                settings.chat_mode,
+                settings.context,
+                settings.max_tokens,
+                attempts,
+                seed,
+                eval::inputs(0, *seed).len(),
+                cases,
+                rows.join("\n")
+            );
+            artifact::write(output.join("summary.md"), markdown)?;
             println!(
                 "{} programs: {}\nReports: {}",
                 reports.len(),

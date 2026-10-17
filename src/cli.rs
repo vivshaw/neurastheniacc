@@ -31,6 +31,10 @@ pub struct ModelOptions {
 }
 
 impl ModelOptions {
+    pub fn selection(&self) -> &str {
+        &self.model
+    }
+
     pub fn load(&self) -> Result<Generator> {
         self.load_with_prompt(model::DEFAULT_PROMPT.into())
     }

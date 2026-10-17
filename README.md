@@ -51,7 +51,7 @@ JS
 
 This loop belongs to the compiler. It uses syntax, Wasm type/structure validation, and export checks; it does not use Clang results or semantic counterexamples. A valid but incorrect translation stops the loop too. Each retry has a fresh inference context with the same system prompt, source, token budget, and decoding settings; it receives only the most recent final answer and diagnostic, omitting reasoning traces; if no final answer was produced, feedback explicitly says so. Earlier attempts are not replayed. Token-limit failures can be retried; inference/context errors stop immediately.
 
-All attempts are retained in a unique directory beside the output (`mix.attempts-…/`), with exact inputs, responses, extracted WAT, diagnostics, and validated binaries. The final report lists that directory and every attempt. The requested `.wasm` is written only after success. Artifacts are published through temporary files and atomic renames, so readers do not see partial writes. Each file is published independently; the artifact set is not a single transaction. Unsupported source is rejected before inference; the only text cleanup is removal of an optional single Markdown code fence.
+Normal compilation writes only the sibling `.wat` and `.wasm` files. Diagnostics and the success message go to stderr; failure returns a nonzero exit code. Use `compile --verbose` to see each attempt and its validation diagnostic without saving debug files. The requested `.wasm` is written only after success; a failed attempt's extracted WAT may remain for inspection. Existing `.wat` and `.wasm` outputs are removed when compilation starts so an older binary cannot be mistaken for the new result. Files are published through temporary files and atomic renames, independently rather than as a single transaction. Unsupported source is rejected before inference; the only text cleanup is removal of an optional single Markdown code fence.
 
 ## Model and cache
 
@@ -76,7 +76,7 @@ The pinned revisions and checksums live in `src/model.rs`. The cache is `$XDG_CA
 
 `--offline` fails if the selected preset is absent, without contacting the network. `--model` also accepts a local GGUF path and records its hash; it requires a chat template supported by llama.cpp. GPU acceleration requires access to the GPU, which some application sandboxes restrict. `--gpu-layers 0` explicitly selects CPU inference. The first Metal inference may also incur kernel initialization costs.
 
-Both presets automatically use Qwen's text-only chat template with `enable_thinking=false`, including its empty thinking prefix. Override this with `--qwen-thinking` to use the model's thinking format (including the cached high model's default `xhigh` effort instruction). For example, use `--qwen-thinking --context 16384 --max-tokens 8192`; reasoning and the final answer share that output budget. Thinking mode preserves the raw response and saves separate `reasoning.txt` and `answer.txt` files in each attempt directory. Only text after the closing `</think>` is passed to the WAT parser; a missing closing delimiter is rejected. The non-thinking default is unchanged. For a custom Qwen GGUF path, request this with `--qwen-no-thinking`. The setting is recorded in compilation reports. The compiler system prompt stays unchanged, and every model response is preserved. Repairs are new model responses driven by validator feedback, not edits made by the compiler.
+Both presets automatically use Qwen's text-only chat template with `enable_thinking=false`, including its empty thinking prefix. Override this with `--qwen-thinking` to use the model's thinking format (including the cached high model's default `xhigh` effort instruction). For example, use `--qwen-thinking --context 16384 --max-tokens 8192`; reasoning and the final answer share that output budget. Benchmark runs preserve the raw response and save separate `reasoning.txt` and `answer.txt` files in each attempt directory. Only text after the closing `</think>` is passed to the WAT parser; a missing closing delimiter is rejected. The non-thinking default is unchanged. For a custom Qwen GGUF path, request this with `--qwen-no-thinking`. The setting is recorded in benchmark compilation reports. The compiler system prompt stays unchanged, and benchmark runs preserve every model response. Repairs are new model responses driven by validator feedback, not edits made by the compiler.
 
 The weights are the only downloaded runtime asset; there is no background process to manage. Compilation and Wasm execution do not require Clang.
 
@@ -132,22 +132,23 @@ cargo build --release --locked --bin neurastheniacc-bench
   --out-dir runs/c-to-wat-thinking
 ```
 
-Measured results are in [benchmarks/README.md](benchmarks/README.md), with full raw responses in the archived JSON reports. In the historical one-shot runs on the same frozen 32-program corpus, the original 1.5B baseline passed 4/32, `low` (Qwen3.5-4B) passed 17/32, and `high` (Qwen3.8-27B) passed 31/32. Median compilation times were 0.73, 1.96, and 10.05 seconds respectively.
+Local result summaries live in the gitignored `benchmarks/` directory, with detailed artifacts under `runs/`. In the historical one-shot runs on the same frozen 32-program corpus, the original 1.5B baseline passed 4/32, `low` (Qwen3.5-4B) passed 17/32, and `high` (Qwen3.8-27B) passed 31/32. Median compilation times were 0.73, 1.96, and 10.05 seconds respectively.
 
 Each function is tested against Clang `-std=c11 -O2` on a fixed 18 × 18 grid of edge values plus 1,000 seeded random input pairs by default. `--cases` changes the random count; the 324 edge pairs are always included. Testing stops at the first mismatch or runtime error and reports both the planned and executed counts. The RNG algorithm is fixed for reproducibility.
 
-The benchmark calls the same compiler loop as `compile`, with five total attempts by default. `bench --attempts 1` reproduces the one-shot baselines. The model stays loaded across a benchmark, but every generation attempt receives a fresh inference context. Decoding is greedy. This does **not** promise identical bytes across hardware or inference-library versions.
+The benchmark calls the same compiler loop as `compile`, with five total attempts by default. It explicitly enables recording: each program gets a unique `*.attempts-…/` directory containing inputs, responses, diagnostics, WAT, and validated binaries, plus sibling raw-response and report files. Ordinary compilation does not enable recording. `bench --attempts 1` reproduces the one-shot baselines. The model stays loaded across a benchmark, but every generation attempt receives a fresh inference context. Decoding is greedy. This does **not** promise identical bytes across hardware or inference-library versions.
 
 Every candidate is checked for a correct `(i32, i32) -> i32` export. Execution forbids imports, start functions, globals, memories and tables. Each input runs in a fresh Wasm instance with a 100,000-unit fuel limit. These restrictions are part of this prototype's contract.
 
-Outputs include:
+Benchmark outputs include:
 
 - `.raw.txt`: unmodified final model response; earlier responses live in the attempt directory.
 - `.wat`: extracted candidate, even if assembly fails.
 - `.wasm`: valid candidate, including candidates that fail differential checking.
-- `.report.json`: compilation result (schema 8), every attempt and feedback input, source/model/output hashes, inference settings, token counts, stop reasons and total timing.
+- `.report.json`: compilation result, every attempt and feedback input, source/model/output hashes, inference settings, token counts, stop reasons and total timing.
 - `.check.json`: benchmark evaluation result and counterexample, with the compilation report nested separately.
-- `summary.json`: all benchmark reports, aggregate outcomes and Clang version.
+- `summary.md`: readable settings, counts, and per-fixture outcomes.
+- `summary.json`: detailed benchmark reports, aggregate outcomes and Clang version.
 
 Compilation reports store generations once, in `attempts[].generation`; the final response is in the last attempt. Settings record one `chat_mode`: `model_template`, `qwen_no_thinking`, or `qwen_thinking`.
 

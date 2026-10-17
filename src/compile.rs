@@ -12,9 +12,6 @@ use std::{
     time::Instant,
 };
 
-// Bump when the compilation report format changes.
-const REPORT_SCHEMA_VERSION: u32 = 8;
-
 pub const MAX_ATTEMPTS: u32 = 5;
 pub const DEFAULT_ATTEMPTS: u32 = MAX_ATTEMPTS;
 
@@ -57,7 +54,6 @@ impl std::fmt::Display for Status {
 
 #[derive(Serialize)]
 pub struct Report {
-    schema_version: u32,
     compiler_version: &'static str,
     platform: String,
     model_sha256: String,
@@ -68,11 +64,21 @@ pub struct Report {
     model_load_seconds: f64,
     compilation_seconds: f64,
     pub status: Status,
-    error: Option<String>,
+    pub error: Option<String>,
     wasm_sha256: Option<String>,
     max_attempts: u32,
-    attempt_directory: PathBuf,
+    attempt_directory: Option<PathBuf>,
     attempts: Vec<Attempt>,
+}
+
+impl Report {
+    pub fn attempt_count(&self) -> usize {
+        self.attempts.len()
+    }
+
+    pub fn compilation_seconds(&self) -> f64 {
+        self.compilation_seconds
+    }
 }
 
 #[derive(Serialize)]
@@ -104,9 +110,7 @@ impl Artifacts {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Path> {
-        [&self.wasm, &self.wat, &self.raw, &self.report]
-            .into_iter()
-            .map(PathBuf::as_path)
+        [&self.wasm, &self.wat].into_iter().map(PathBuf::as_path)
     }
 }
 
@@ -121,7 +125,7 @@ fn resolve(path: &Path) -> PathBuf {
     }
 }
 
-/// Compilation replaces every sibling artifact, so none of them may be the source itself.
+/// Neither compilation output may overwrite the source itself.
 pub fn ensure_artifacts_do_not_clobber(source: &Path, output: &Path) -> Result<()> {
     let source = resolve(source);
     for artifact in Artifacts::new(output).iter() {
@@ -143,11 +147,19 @@ pub struct Compilation {
     pub output: Option<Vec<u8>>,
 }
 
+#[derive(Default)]
+pub struct Options {
+    pub verbose: bool,
+    /// Benchmark-only persistence of responses, reports, and attempt history.
+    pub record: bool,
+}
+
 pub fn compile(
     compiler: &Generator,
     source: &source::Source,
     output: &Path,
     max_attempts: u32,
+    options: Options,
 ) -> Result<Compilation> {
     ensure!(
         (1..=MAX_ATTEMPTS).contains(&max_attempts),
@@ -164,34 +176,51 @@ pub fn compile(
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     // Preserve every invocation's history, including when the output name is reused.
-    let attempt_directory = tempfile::Builder::new()
-        .prefix(&format!(
-            "{}.attempts-",
-            output.file_stem().unwrap().to_string_lossy()
-        ))
-        .tempdir_in(parent)?
-        .keep();
-    // A failed recompile must not leave an older binary or report looking like its result.
-    // Previous invocations remain available in their unique attempt directories.
+    let attempt_directory = if options.record {
+        Some(
+            tempfile::Builder::new()
+                .prefix(&format!(
+                    "{}.attempts-",
+                    output.file_stem().unwrap().to_string_lossy()
+                ))
+                .tempdir_in(parent)?
+                .keep(),
+        )
+    } else {
+        None
+    };
+    // A failed recompile must not leave an older binary looking like its result.
     for artifact in artifacts.iter() {
         if artifact.exists() {
             fs::remove_file(artifact)?;
+        }
+    }
+    if options.record {
+        for path in [&artifacts.raw, &artifacts.report] {
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
         }
     }
     let start = Instant::now();
     let LoopOutput {
         attempts,
         bytes,
-        wat_path,
-    } = wat_loop(source, max_attempts, &attempt_directory, |input| {
-        compiler.generate(input)
-    })?;
+        wat,
+    } = wat_loop(
+        source,
+        max_attempts,
+        attempt_directory.as_deref(),
+        options.verbose,
+        |input| compiler.generate(input),
+    )?;
     let last = attempts.last().unwrap();
-    if let Some(generation) = &last.generation {
+    if options.record
+        && let Some(generation) = &last.generation
+    {
         artifact::write(&artifacts.raw, &generation.raw)?;
     }
     let mut report = Report {
-        schema_version: REPORT_SCHEMA_VERSION,
         compiler_version: env!("CARGO_PKG_VERSION"),
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         model_sha256: compiler.model_sha256().to_owned(),
@@ -208,24 +237,28 @@ pub fn compile(
         attempt_directory,
         attempts,
     };
-    if let Some(path) = wat_path {
-        artifact::write(&artifacts.wat, fs::read(path)?)?;
+    if let Some(wat) = wat {
+        artifact::write(&artifacts.wat, wat)?;
     }
     if let Some(bytes) = &bytes {
         artifact::write(&artifacts.wasm, bytes)?;
         report.wasm_sha256 = Some(model::digest(bytes));
     }
     report.compilation_seconds = start.elapsed().as_secs_f64();
-    let json = serde_json::to_string_pretty(&report)?;
-    artifact::write(&artifacts.report, &json)?;
-    artifact::write(report.attempt_directory.join("report.json"), &json)?;
-    eprintln!(
-        "{}: {} ({} attempts, {:.2}s)",
-        source.name(),
-        report.status,
-        report.attempts.len(),
-        report.compilation_seconds
-    );
+    if let Some(directory) = &report.attempt_directory {
+        let json = serde_json::to_string_pretty(&report)?;
+        artifact::write(&artifacts.report, &json)?;
+        artifact::write(directory.join("report.json"), &json)?;
+    }
+    if options.verbose {
+        eprintln!(
+            "{}: {} ({} attempts, {:.2}s)",
+            source.name(),
+            report.status,
+            report.attempts.len(),
+            report.compilation_seconds
+        );
+    }
     Ok(Compilation {
         report,
         output: bytes,
@@ -271,7 +304,7 @@ pub fn extract_wat(raw: &str) -> Result<String> {
 struct LoopOutput {
     attempts: Vec<Attempt>,
     bytes: Option<Vec<u8>>,
-    wat_path: Option<PathBuf>,
+    wat: Option<String>,
 }
 
 /// One attempt's generation and model-behavior verdict, before any persistence.
@@ -364,19 +397,24 @@ impl Outcome {
 fn wat_loop(
     source: &source::Source,
     max_attempts: u32,
-    directory: &Path,
+    directory: Option<&Path>,
+    verbose: bool,
     mut generate: impl FnMut(&str) -> Result<Generation>,
 ) -> Result<LoopOutput> {
     let mut attempts = Vec::new();
-    let mut wat_path = None;
+    let mut wat = None;
     let mut input = source.canonical().to_owned();
     for number in 1..=max_attempts {
-        let prefix = directory.join(format!("attempt-{number}"));
-        artifact::write(prefix.with_extension("input.txt"), &input)?;
+        let prefix = directory.map(|directory| directory.join(format!("attempt-{number}")));
+        if let Some(prefix) = &prefix {
+            artifact::write(prefix.with_extension("input.txt"), &input)?;
+        }
         let start = Instant::now();
         let output = produce_attempt(source, &input, &mut generate);
         // Persist everything the attempt produced; I/O failures abort compilation.
-        if let Some(generation) = &output.generation {
+        if let Some(prefix) = &prefix
+            && let Some(generation) = &output.generation
+        {
             artifact::write(prefix.with_extension("raw.txt"), &generation.raw)?;
             if let Some(reasoning) = &generation.reasoning {
                 artifact::write(prefix.with_extension("reasoning.txt"), reasoning)?;
@@ -385,17 +423,17 @@ fn wat_loop(
                 artifact::write(prefix.with_extension("answer.txt"), answer)?;
             }
         }
-        wat_path = match &output.wat {
-            Some(wat) => {
-                let path = prefix.with_extension("wat");
-                artifact::write(&path, wat)?;
-                Some(path)
-            }
-            None => None,
-        };
+        if let Some(prefix) = &prefix
+            && let Some(wat) = &output.wat
+        {
+            artifact::write(prefix.with_extension("wat"), wat)?;
+        }
+        wat = output.wat;
         let (status, error, bytes) = match output.outcome {
             Outcome::Compiled(bytes) => {
-                artifact::write(prefix.with_extension("wasm"), &bytes)?;
+                if let Some(prefix) = &prefix {
+                    artifact::write(prefix.with_extension("wasm"), &bytes)?;
+                }
                 (Status::Compiled, None, Some(bytes))
             }
             Outcome::Rejected { status, error } => (status, Some(error), None),
@@ -408,22 +446,29 @@ fn wat_loop(
             generation: output.generation,
             seconds: start.elapsed().as_secs_f64(),
         };
-        artifact::write(
-            prefix.with_extension("report.json"),
-            serde_json::to_string_pretty(&attempt)?,
-        )?;
-        eprintln!(
-            "{}: attempt {number}/{max_attempts}: {}",
-            source.name(),
-            attempt.status
-        );
+        if let Some(prefix) = &prefix {
+            artifact::write(
+                prefix.with_extension("report.json"),
+                serde_json::to_string_pretty(&attempt)?,
+            )?;
+        }
+        if verbose {
+            eprintln!(
+                "{}: attempt {number}/{max_attempts}: {}",
+                source.name(),
+                attempt.status
+            );
+            if let Some(error) = &attempt.error {
+                eprintln!("{error}");
+            }
+        }
         let retry = attempt.status.retryable();
         attempts.push(attempt);
         if let Some(bytes) = bytes {
             return Ok(LoopOutput {
                 attempts,
                 bytes: Some(bytes),
-                wat_path,
+                wat,
             });
         }
         if !retry || number == max_attempts {
@@ -434,7 +479,7 @@ fn wat_loop(
     Ok(LoopOutput {
         attempts,
         bytes: None,
-        wat_path,
+        wat,
     })
 }
 
@@ -493,7 +538,7 @@ mod tests {
         let mut calls = 0;
         let LoopOutput {
             attempts, bytes, ..
-        } = wat_loop(&src, 5, dir.path(), |input| {
+        } = wat_loop(&src, 5, Some(dir.path()), false, |input| {
             calls += 1;
             match calls {
                 1 => {
@@ -527,6 +572,47 @@ mod tests {
     }
 
     #[test]
+    fn recording_is_optional_and_does_not_change_repair_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |directory| {
+            let mut calls = 0;
+            wat_loop(&source(), 2, directory, false, |input| {
+                calls += 1;
+                if calls == 1 {
+                    Ok(generation("(module"))
+                } else {
+                    assert!(input.contains("invalid_wat"));
+                    Ok(generation(VALID))
+                }
+            })
+            .unwrap()
+        };
+        let ordinary = run(None);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+        let recorded = run(Some(dir.path()));
+        assert_eq!(ordinary.bytes, recorded.bytes);
+        assert_eq!(ordinary.wat, recorded.wat);
+        assert_eq!(
+            ordinary
+                .attempts
+                .iter()
+                .map(|a| a.status)
+                .collect::<Vec<_>>(),
+            recorded
+                .attempts
+                .iter()
+                .map(|a| a.status)
+                .collect::<Vec<_>>()
+        );
+        assert!(dir.path().join("attempt-1.report.json").exists());
+        assert!(dir.path().join("attempt-2.wasm").exists());
+        let failed = wat_loop(&source(), 1, None, false, |_| Ok(generation("bad"))).unwrap();
+        assert_eq!(failed.attempts[0].status, Status::InvalidOutput);
+        assert!(failed.bytes.is_none());
+        assert!(failed.wat.is_none());
+    }
+
+    #[test]
     fn thinking_retries_omit_reasoning_but_preserve_raw_history() {
         for (answer, stop, expected) in [
             (Some("(module"), StopReason::Eos, Status::InvalidWat),
@@ -539,7 +625,7 @@ mod tests {
                 "PRIVATE_REASONING{}",
                 answer.map_or(String::new(), |a| format!("</think>{a}"))
             );
-            let result = wat_loop(&source(), 2, dir.path(), |input| {
+            let result = wat_loop(&source(), 2, Some(dir.path()), false, |input| {
                 calls += 1;
                 if calls == 1 {
                     let mut output = generation(&raw);
@@ -578,13 +664,16 @@ mod tests {
         for limit in [1, 5] {
             let LoopOutput {
                 attempts, bytes, ..
-            } = wat_loop(&source(), limit, dir.path(), |_| Ok(generation("bad"))).unwrap();
+            } = wat_loop(&source(), limit, Some(dir.path()), false, |_| {
+                Ok(generation("bad"))
+            })
+            .unwrap();
             assert_eq!(attempts.len(), limit as usize);
             assert!(bytes.is_none());
         }
         let LoopOutput {
             attempts, bytes, ..
-        } = wat_loop(&source(), 5, dir.path(), |_| {
+        } = wat_loop(&source(), 5, Some(dir.path()), false, |_| {
             anyhow::bail!("inference unavailable")
         })
         .unwrap();
@@ -597,19 +686,19 @@ mod tests {
     fn final_attempt_artifact_does_not_reuse_an_earlier_wat() {
         let dir = tempfile::tempdir().unwrap();
         let mut calls = 0;
-        let result = wat_loop(&source(), 2, dir.path(), |_| {
+        let result = wat_loop(&source(), 2, Some(dir.path()), false, |_| {
             calls += 1;
             Ok(generation(if calls == 1 { "(module" } else { "not WAT" }))
         })
         .unwrap();
         assert!(dir.path().join("attempt-1.wat").exists());
-        assert!(result.wat_path.is_none());
+        assert!(result.wat.is_none());
         assert!(result.bytes.is_none());
-        let result = wat_loop(&source(), 1, dir.path(), |_| Ok(generation(VALID))).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(result.wat_path.unwrap()).unwrap(),
-            VALID
-        );
+        let result = wat_loop(&source(), 1, Some(dir.path()), false, |_| {
+            Ok(generation(VALID))
+        })
+        .unwrap();
+        assert_eq!(result.wat.unwrap(), VALID);
     }
 
     #[test]
@@ -617,7 +706,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let LoopOutput {
             attempts, bytes, ..
-        } = wat_loop(&source(), 5, dir.path(), |_| {
+        } = wat_loop(&source(), 5, Some(dir.path()), false, |_| {
             Ok(generation(
                 "(module (func (export \"f\") (param i32 i32) (result i32) i32.const 0))",
             ))
