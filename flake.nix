@@ -1,5 +1,5 @@
 {
-  description = "neurastheniacc: a local LLM compiler from unsigned C to WebAssembly";
+  description = "the groundbreaking new LLM-based C->WASM compiler you didn't need";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -38,8 +38,9 @@
             # CMake is invoked by llama.cpp's Cargo build script, not as a top-level phase.
             dontUseCmakeConfigure = true;
             meta = {
-              description = "Experimental local LLM compiler for unsigned C";
+              description = "the groundbreaking new LLM-based C->WASM compiler you didn't need";
               mainProgram = "neurastheniacc";
+              license = pkgs.lib.licenses.mit;
               platforms = systems;
             };
           };
