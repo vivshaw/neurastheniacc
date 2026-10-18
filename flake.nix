@@ -48,6 +48,7 @@
           inherit package;
           shell = pkgs.mkShell {
             packages = with pkgs; [
+              git
               cargo
               rustc
               rustfmt
