@@ -4,7 +4,7 @@ A groundbreaking C -> WASM compiler wielding the unbridled power of LLMs!!
 
 ## What is this?
 
-`neurastheniacc` compiles a restricted subset of C down into WASM. It follows the usual two-pass approach: first from C to readable WAT, then from WAT to WASM bytecode. However, there's a trailblazing advance that distinguishes as `neurastheniacc` from all previous (lesser? (∩￢з￢)) WASM compilers: **the C->WAT pass is handled purely by an LLM.**
+`neurastheniacc` compiles a restricted subset of C down into WASM. It follows the usual two-pass approach: first from C to readable WAT, then from WAT to WASM bytecode. However, there's a trailblazing advance that distinguishes `neurastheniacc` from all previous (lesser? (∩￢з￢)) WASM compilers: **the C->WAT pass is handled purely by an LLM.**
 
 ### Benefits
 
