@@ -28,14 +28,14 @@ pub struct ModelPreset {
 
 pub fn preset(name: &str) -> Option<ModelPreset> {
     match name {
-        "low" => Some(ModelPreset {
+        "qwen-low" => Some(ModelPreset {
             file: "Qwen3.5-4B-Q4_K_M.gguf",
             sha: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
             size: 2_740_937_888,
             url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf",
             chat_mode: ChatMode::QwenNoThinking,
         }),
-        "high" => Some(ModelPreset {
+        "qwen-high" => Some(ModelPreset {
             file: "Qwen3.8-27B-UD-Q4_K_M.gguf",
             sha: "322e194ff79741c7baa497c240f677f54b201b0efab44ca8e50f122b39123482",
             size: 16_464_440_224,
@@ -352,13 +352,13 @@ mod tests {
     fn offline_missing_cache_is_an_error_without_creating_files() {
         let temp = tempfile::tempdir().unwrap();
         let missing = temp.path().join("missing");
-        assert!(resolve("high", &missing, true).is_err());
+        assert!(resolve("qwen-high", &missing, true).is_err());
         assert!(!missing.exists());
     }
     #[test]
     fn corrupted_cache_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join(preset("high").unwrap().file), "bad").unwrap();
-        assert!(resolve("high", temp.path(), true).is_err());
+        fs::write(temp.path().join(preset("qwen-high").unwrap().file), "bad").unwrap();
+        assert!(resolve("qwen-high", temp.path(), true).is_err());
     }
 }

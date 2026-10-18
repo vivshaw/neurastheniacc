@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 pub struct ModelOptions {
-    /// Select high (27B), low (4B), or a local GGUF path.
-    #[arg(long, global = true, default_value = "high")]
+    /// Select qwen-low (4B), qwen-high (27B), or a local GGUF path.
+    #[arg(long, global = true, default_value = "qwen-low")]
     model: String,
     #[arg(long, global = true)]
     cache_dir: Option<PathBuf>,
@@ -22,12 +22,10 @@ pub struct ModelOptions {
     /// Use 0 for CPU-only inference. Metal is bundled on macOS.
     #[arg(long, global = true, default_value_t = 99)]
     gpu_layers: u32,
-    /// Use Qwen's explicit non-thinking chat format (requires a compatible template).
-    #[arg(long, global = true)]
-    qwen_no_thinking: bool,
-    /// Enable Qwen thinking; overrides the presets' non-thinking default.
-    #[arg(long, global = true, conflicts_with = "qwen_no_thinking")]
-    qwen_thinking: bool,
+    /// Set Qwen thinking (requires a compatible template). Bare flag enables it;
+    /// omitted uses non-thinking for presets or the custom model's template.
+    #[arg(long, global = true, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    qwen_thinking: Option<bool>,
 }
 
 impl ModelOptions {
@@ -51,12 +49,11 @@ impl ModelOptions {
     }
 
     fn chat_mode(&self) -> ChatMode {
-        if self.qwen_thinking {
-            ChatMode::QwenThinking
-        } else if self.qwen_no_thinking {
-            ChatMode::QwenNoThinking
-        } else {
-            model::preset(&self.model).map_or(ChatMode::ModelTemplate, |preset| preset.chat_mode)
+        match self.qwen_thinking {
+            Some(true) => ChatMode::QwenThinking,
+            Some(false) => ChatMode::QwenNoThinking,
+            None => model::preset(&self.model)
+                .map_or(ChatMode::ModelTemplate, |preset| preset.chat_mode),
         }
     }
 
@@ -79,16 +76,29 @@ mod tests {
 
     #[test]
     fn resolves_presets_custom_templates_and_explicit_overrides() {
+        assert_eq!(Cli::parse_from(["test"]).model.selection(), "qwen-low");
         for (args, expected) in [
             (vec!["test"], ChatMode::QwenNoThinking),
-            (vec!["test", "--model", "low"], ChatMode::QwenNoThinking),
+            (
+                vec!["test", "--model", "qwen-low"],
+                ChatMode::QwenNoThinking,
+            ),
+            (
+                vec!["test", "--model", "qwen-high"],
+                ChatMode::QwenNoThinking,
+            ),
             (vec!["test", "--qwen-thinking"], ChatMode::QwenThinking),
+            (vec!["test", "--qwen-thinking=true"], ChatMode::QwenThinking),
+            (
+                vec!["test", "--qwen-thinking=false"],
+                ChatMode::QwenNoThinking,
+            ),
             (
                 vec!["test", "--model", "custom.gguf"],
                 ChatMode::ModelTemplate,
             ),
             (
-                vec!["test", "--model", "custom.gguf", "--qwen-no-thinking"],
+                vec!["test", "--model", "custom.gguf", "--qwen-thinking=false"],
                 ChatMode::QwenNoThinking,
             ),
             (
@@ -101,7 +111,8 @@ mod tests {
                 expected
             );
         }
-        assert!(Cli::try_parse_from(["test", "--qwen-thinking", "--qwen-no-thinking"]).is_err());
+        assert!(Cli::try_parse_from(["test", "--qwen-thinking=maybe"]).is_err());
+        assert!(Cli::try_parse_from(["test", "--qwen-no-thinking"]).is_err());
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::{
 };
 
 pub const MAX_ATTEMPTS: u32 = 5;
-pub const DEFAULT_ATTEMPTS: u32 = MAX_ATTEMPTS;
+pub const DEFAULT_ATTEMPTS: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
