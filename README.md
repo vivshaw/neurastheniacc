@@ -32,9 +32,7 @@ wasmtime run --invoke mix mix.wasm 3 5
 
 `neurastheniacc` is fully local. On first run, it downloads a Qwen GGUF and caches it. Inference is then provided during compilation by [llama-cpp-2](https://crates.io/crates/llama-cpp-2). No API keys or calls to inference providers required.
 
-During compilation, `neurastheniacc` validates that your C code is supported, provides your code to Qwen, and asks it nicely to translate it into valid WAT. The model's lovingly tensor-crafted WAT (just like wire mother used to make!) is then parsed for correctness by [wat](https://crates.io/crates/wat). What happens if, Lord forbid, the model should generate invalid WAT? Never fear: a simple harness provides the current state and parser feedback back to Qwen for another attempt, with up to 3 turns allowed by default.
-
-Once the model extrudes a valid WAT, [wasmi](https://docs.rs/wasmi/latest/wasmi/) is used to compile it down to executable WASM.
+During compilation, `neurastheniacc` validates that your C code is supported, provides your code to Qwen, and asks it nicely to translate it into valid WAT. We then take Qwen's lovingly tensor-crafted WAT (just like wire mother used to make!) and attempt to parse in with [wat](https://crates.io/crates/wat) and build it with [wasmi](https://crates.io/crates/wasmi). What happens if, Lord forbid, the model should generate invalid WAT? Never fear: a simple harness provides the current state and parser feedback back to Qwen for another attempt, with up to 3 turns allowed by default.
 
 ## C subset
 
