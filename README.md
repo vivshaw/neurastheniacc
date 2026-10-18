@@ -1,220 +1,170 @@
 # neurastheniacc
 
-An experimental compiler whose code generator is a local language model.
+A groundbreaking C -> WASM compiler wielding the unbridled power of LLMs!!
 
-```
-restricted unsigned C → Qwen running inside Rust → WAT → .wasm
-```
+## What is this?
 
-No Ollama, model server, API key, or hosted inference. The executable downloads a pinned GGUF on first use, verifies its SHA-256, and caches it. The generated WebAssembly runs without a model. **This is a reliability experiment, not a production compiler.**
+`neurastheniacc` compiles a restricted subset of C down into WASM. It follows the usual two-pass approach: first from C to readable WAT, then from WAT to WASM bytecode. However, there's a trailblazing advance that distinguishes as `neurastheniacc` from all previous (lesser? (∩￢з￢)) WASM compilers: **the C->WAT pass is handled purely by an LLM.**
 
-The first implementation uses Rust, statically linked llama.cpp through `llama-cpp-2`, the `wat` assembler, and the `wasmi` interpreter. The front end only validates and normalizes the input. It does not generate instructions. Every instruction in the output comes from the model; the assembler encodes it. Clang is used only as an independent testing oracle.
+### Benefits
 
-## Try it
+With `neurastheniacc`, you can finally alchemize money directly into performance, without any need for pesky intermediaries like "compiler expertise"! If you're unsatisfied with the defaults' results, try any of the following:
 
-With Nix (flakes enabled), enter the pinned development environment:
+- Use a larger Qwen, merely costing more GPU compute!
+- Extend the token limits, reasoning budget, or allowed retries, merely costing more execution time!
+- Build your own stochastically optimizing compiler: run `neurastheniacc` in a loop 100 times, and pick the best output!
+- Or for the real sickoes, finetune your own C->WAT model and provide a custom GGUF! (Please wash your hands afterward.)
 
-```sh
-nix develop
-cargo build --workspace --release --locked --bins
-```
-
-The shell provides Rust, Cargo, rustfmt, Clippy, rust-analyzer, Clang/libclang, CMake, and Wasmtime. It targets Apple Silicon macOS and ARM64/x86-64 Linux. Metal remains enabled on macOS; Linux uses CPU inference. No separate model server or system Rust installation is needed.
-
-To build and run directly through Nix:
+## Try it (or else)!
 
 ```sh
-nix build                         # both binaries in result/bin/
-nix run . -- --help               # compiler
-nix run .#bench -- --help         # benchmark tool
-nix flake check                  # build and run the tests; no model needed
-nix fmt flake.nix                # format the flake
-```
-
-Run benchmark commands inside `nix develop` so Clang is available for the reference compiler. Nix pins build dependencies in `flake.lock` and Rust crates in `Cargo.lock`; model weights are downloaded separately on first use and stay in the normal user cache. Build inputs exclude `runs/`, `benchmarks/`, and cached weights.
-
-Without Nix:
-
-Build requirements: Rust with Cargo, CMake, and a C/C++ toolchain with libclang available for bindgen. On macOS, install Xcode Command Line Tools and CMake. On Debian/Ubuntu, the corresponding packages include `build-essential cmake clang libclang-dev`. Tested here with Rust 1.95 on macOS ARM64. Metal is compiled in on macOS; other platforms use CPU inference by default.
-
-Install [Wasmtime](https://docs.wasmtime.dev/cli-install.html) to run the generated module.
-
-```sh
+# plz builb (๑•́ ω •̀๑)
 cargo build --release --locked --bin neurastheniacc
 
-# First use downloads about 16.46 GB, then compiles the example.
-./target/release/neurastheniacc compile examples/mix.c -o runs/demo/mix.wasm
+# First use downloads ~2.75 GB of Qwen weights, then compiles.
+./target/release/neurastheniacc compile examples/mix.c -o mix.wasm
 
 # Invoke the exported function in a standard Wasm runtime.
-wasmtime run --invoke mix runs/demo/mix.wasm 3 5
-# 107
+wasmtime run --invoke mix mix.wasm 3 5
 ```
 
-The module exports `mix(i32, i32) -> i32`, so `--invoke mix` selects the function to call.
+## Under the hood
 
-Alternatively, run it with Node.js:
+`neurastheniacc` is fully local. On first run, it downloads a Qwen GGUF and caches it. Inference is then provided during compilation by [llama-cpp-2](https://crates.io/crates/llama-cpp-2). No API keys or calls to inference providers required.
 
-```sh
-node --input-type=module - <<'JS'
-import { readFileSync } from "node:fs";
-const { instance } = await WebAssembly.instantiate(
-  readFileSync("runs/demo/mix.wasm")
-);
-console.log(instance.exports.mix(3, 5) >>> 0);
-JS
-```
+During compilation, `neurastheniacc` validates that your C code is supported, provides your code to Qwen, and asks it nicely to translate it into valid WAT. The model's lovingly tensor-crafted WAT (just like wire mother used to make!) is then parsed for correctness by [wat](https://crates.io/crates/wat). What happens if, Lord forbid, the model should generate invalid WAT? Never fear: a simple harness provides the current state and parser feedback back to Qwen for another attempt, with up to 3 turns allowed by default.
 
-`>>> 0` displays the return value as an unsigned 32-bit integer.
+Once the model extrudes a valid WAT, [wasmi](https://docs.rs/wasmi/latest/wasmi/) is used to compile it down to executable WASM.
 
-`compile` generates WAT, assembles it, and validates the module and exported signature. If validation fails, it sends the original C, the previous response, and the diagnostic back to the model. It stops at the first valid module or after **five total attempts** (the initial translation plus up to four repairs). Use `--attempts 1` for one-shot compilation, or choose any limit from 1 to 5.
+## C subset
 
-```sh
-./target/release/neurastheniacc compile examples/mix.c --attempts 5 -o runs/repair/mix.wasm
-```
+`neurastheniacc` supports this astonishingly flexible program structure: One C function, returning `uint32_t`, with exactly two `uint32_t` parameters. An optional `#include <stdint.h>` is graciously accepted for your convenience.
 
-This loop belongs to the compiler. It uses syntax, Wasm type/structure validation, and export checks; it does not use Clang results or semantic counterexamples. A valid but incorrect translation stops the loop too. Each retry has a fresh inference context with the same system prompt, source, token budget, and decoding settings; it receives only the most recent final answer and diagnostic, omitting reasoning traces; if no final answer was produced, feedback explicitly says so. Earlier attempts are not replayed. Token-limit failures can be retried; inference/context errors stop immediately.
+### Supported features
 
-Normal compilation writes only the sibling `.wat` and `.wasm` files. Diagnostics and the success message go to stderr; failure returns a nonzero exit code. Use `compile --verbose` to see each attempt and its validation diagnostic without saving debug files. The requested `.wasm` is written only after success; a failed attempt's extracted WAT may remain for inspection. Existing `.wat` and `.wasm` outputs are removed when compilation starts so an older binary cannot be mistaken for the new result. Files are published through temporary files and atomic renames, independently rather than as a single transaction. Unsupported source is rejected before inference; the only text cleanup is removal of an optional single Markdown code fence.
-
-## Model and cache
-
-`--model high` is the default. Both presets download pinned weights on first use and verify their size and SHA-256 before caching them.
-
-| Selection | Model | Download | Chat mode |
-| --- | --- | ---: | --- |
-| `high` (default) | [Qwen3.8-27B UD-Q4_K_M](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | 16.46 GB | Non-thinking, configured automatically |
-| `low` | [Qwen3.5-4B Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF) | 2.74 GB | Non-thinking, configured automatically |
-
-The pinned revisions and checksums live in `crates/neurastheniacc/src/model.rs`. The cache is `$XDG_CACHE_HOME/neurastheniacc` if set, otherwise `~/Library/Caches/neurastheniacc` on macOS or `~/.cache/neurastheniacc` elsewhere. Override it with `--cache-dir`. Downloads use a temporary file and are atomically installed only after size and checksum validation. Interrupted downloads are discarded; the next attempt starts again. Cached weights are verified on each model-using invocation.
-
-```sh
-./target/release/neurastheniacc fetch                  # Cache high ahead of time
-./target/release/neurastheniacc --model low fetch      # Cache low ahead of time
-./target/release/neurastheniacc compile examples/mix.c # Uses high
-./target/release/neurastheniacc --model low compile examples/mix.c
-./target/release/neurastheniacc --offline compile examples/mix.c
-./target/release/neurastheniacc --model low --gpu-layers 0 compile examples/mix.c
-./target/release/neurastheniacc --model /path/to/another.gguf compile examples/mix.c
-```
-
-`--offline` fails if the selected preset is absent, without contacting the network. `--model` also accepts a local GGUF path and records its hash; it requires a chat template supported by llama.cpp. GPU acceleration requires access to the GPU, which some application sandboxes restrict. `--gpu-layers 0` explicitly selects CPU inference. The first Metal inference may also incur kernel initialization costs.
-
-Both presets automatically use Qwen's text-only chat template with `enable_thinking=false`, including its empty thinking prefix. Override this with `--qwen-thinking` to use the model's thinking format (including the cached high model's default `xhigh` effort instruction). For example, use `--qwen-thinking --context 16384 --max-tokens 8192`; reasoning and the final answer share that output budget. Benchmark runs preserve the complete raw response, including reasoning, in each attempt’s `raw.txt`. Only text after the closing `</think>` is passed to the WAT parser; a missing closing delimiter is rejected. The non-thinking default is unchanged. For a custom Qwen GGUF path, request this with `--qwen-no-thinking`. The setting is recorded in benchmark compilation reports. The compiler system prompt stays unchanged, and benchmark runs preserve every model response. Repairs are new model responses driven by validator feedback, not edits made by the compiler.
-
-The weights are the only downloaded runtime asset; there is no background process to manage. Compilation and Wasm execution do not require Clang.
-
-## Supported C subset
-
-One function returning `uint32_t`, with exactly two `uint32_t` parameters. An optional `#include <stdint.h>` is accepted. The validation target has 32-bit `unsigned int`.
-
-Supported:
+This luxurious subset of C features is provided, that you might write the programs of your dreams:
 
 - Initialized `uint32_t` locals, assignments, nested blocks and variable shadowing.
 - `+`, `-`, `*`, `&`, `|`, `^`, unary `~`, unary `+` and unary `-`.
-- `<<` and `>>` with a literal count from `0u` to `31u`.
-- Unsigned comparisons `==`, `!=`, `<`, `<=`, `>`, `>=` in `if` conditions; integer truthiness is also accepted.
-- Braced `if` / `else`, and early `return`. All paths must return.
-- Decimal and hexadecimal 32-bit integer literals with an explicit `u` or `U` suffix.
 - Line and block comments.
+- `<<` and `>>`, with a literal shift value from `0u` to `31u`.
+- Braced `if` / `else`. All paths must return. If conditions may include:
+  - Unsigned comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`)
+  - Integer truthiness
+- Decimal and hexadecimal 32-bit integer literals with an explicit `u` or `U` suffix.
+- Returns, including early returns.
 
-No pointers, allocation, arrays, loops, calls, recursion, casts, division, remainder, globals, signed types, increment/decrement, compound assignments, logical operators, ternaries, macros, or comparison expressions used as values. `else if` must be written as `else { if (...) { ... } }`. Shift counts cannot be computed expressions; write `(x << 2u) + y`, not `x << 2u + y`. Self-referential local initializers are rejected even when they could refer to an outer name. Identifiers must begin with an ASCII letter and cannot be reserved words or the small oracle harness's reserved names.
+### Unsupported features
 
-Source is capped at 32 KiB, 4096 tokens and 48 nesting levels. C line splicing and trigraphs are rejected. The validated token stream, with comments and the include removed, is sent to both the model and Clang. The oracle compiles the function in its own translation unit under a private symbol to avoid collisions with harness names and I/O macros.
+These extraneous C features _aren't_ supported, and will surely be missed by nobody:
 
-## Benchmarking
+- Pointers, allocation, and casting
+- Arrays
+- Loops, recursion, and `else if`
+- Function calls
+- Frivolous mathemetics such as division, remainder, increment/decrement, or negative numbers
+- Globals
+- Ternaries, or logical operators in general really
+- Compound assignment, comparison expressions used as values
+- Macros
+- Probably a lot of other stuff
+- Don't even _think_ about trigraphs, IOCCC pervert.
 
-The separate `neurastheniacc-bench` executable provides `run` for execution, `check` for comparing an artifact against Clang, and `bench` for compiling and evaluating a corpus. `check` and `bench` require Clang. Test failures do not change compilation reports or remove artifacts. In `check.json`, the harness-owned top-level `attempts` array lists relative paths to attempt reports; those paths are no longer part of the nested `compilation` report.
+### Other restrictions
+
+Your program must be no larger than 32 KiB and 4096 Qwen tokens. You may not use more than 48 levels of nesting.
+
+## CLI options
 
 ```sh
+# Select a model: (default: qwen-low)
+# - `qwen-low` (Qwen3.5-4B-Q4_K_M, 4B, ~2.75GB)
+# - `qwen-high` (Qwen3.8-27B-UD-Q4_K_M.gguf, 27B, ~16.5GB)
+# - or whatever local GGUF your little heart desires
+./target/release/neurastheniacc compile examples/mix.c --model qwen-low
+./target/release/neurastheniacc compile examples/mix.c --model qwen-high
+./target/release/neurastheniacc compile examples/mix.c --model /path/to/model.gguf
+
+# Enable thinking. Only supported with bundled Qwens. (default: disabled)
+./target/release/neurastheniacc compile examples/mix.c \
+  --qwen-thinking=true
+
+# Increase the context or per-attempt token budget.
+./target/release/neurastheniacc compile examples/mix.c \
+  --context 16384 --max-tokens 4096
+
+# Set limit for compilation attempts. (default: 3)
+./target/release/neurastheniacc compile examples/mix.c --attempts 5 --verbose
+
+# Print diagnostics.
+./target/release/neurastheniacc compile examples/mix.c --verbose
+
+# Run on CPU with however many threads.
+./target/release/neurastheniacc compile examples/mix.c --gpu-layers 0 --threads 8
+
+# Download a Qwen to a custom cache, then compile offline.
+./target/release/neurastheniacc fetch --model qwen-low --cache-dir .models
+./target/release/neurastheniacc compile examples/mix.c \
+  --model qwen-low --cache-dir .models --offline
+```
+
+Run `./target/release/neurastheniacc compile --help` for all options and defaults.
+
+## Benchmarks
+
+The `neurastheniacc-bench` executable runs a benchmark on the compiler. Eight standard fixtures are provided, alongside as many randomly generated fixtures as your body can handle. Each fixture is run through `neurastheniacc` with all logs and outputs preserved. For all fixtures that successfully compile to WASM, the resulting executable is proptested against a Clang build of the original C. If we get the same outputs from both `neurastheniacc` and Clang across a wide set of random inputs, then we consider it a successful compilation! °˖✧◝(⁰▿⁰)◜✧˖°
+
+```sh
+# bliud
 cargo build --release --locked --bin neurastheniacc-bench
 
-# Run a saved artifact in the harness.
-./target/release/neurastheniacc-bench run runs/demo/mix.wasm --export mix 3 5
-
-# Compare it against Clang with a different input seed.
-./target/release/neurastheniacc-bench check examples/mix.c runs/demo/mix.wasm --cases 10000 --seed 42
-
-# Eight fixed programs plus 24 generated programs; output directory must be new.
-./target/release/neurastheniacc-bench bench --model low --offline \
-  --generated 24 --seed 20261014 --out-dir benchmarks/my-baseline
-
-# Reproduce the one-shot v4 corpus with Qwen3.8-27B.
-./target/release/neurastheniacc-bench bench \
-  --model high --attempts 1 \
-  --generated 24 --seed 20261014 --out-dir benchmarks/qwen38-v4
-
-# Enable thinking for C → WAT, with up to five attempts.
-./target/release/neurastheniacc-bench bench --model high --offline \
-  --qwen-thinking --context 32768 --max-tokens 8192 \
-  --attempts 5 --generated 24 --cases 1000 --seed 20261014 \
-  --out-dir benchmarks/c-to-wat-thinking
+# Run a benchmark with 32 fixtures, 24 of 'em generated
+./target/release/neurastheniacc-bench bench --model qwen-low \
+  --generated 24 --seed 20261014 --out-dir benchmarks/my-benchmark
 ```
 
-Benchmark output defaults to the gitignored `benchmarks/<Unix timestamp>/` directory: the readable summary, detailed JSON, and attempt artifacts live together. In the historical one-shot runs on the same frozen 32-program corpus, the original 1.5B baseline passed 4/32, `low` (Qwen3.5-4B) passed 17/32, and `high` (Qwen3.8-27B) passed 31/32. Median compilation times were 0.73, 1.96, and 10.05 seconds respectively.
+### Results
 
-Each function is tested against Clang `-std=c11 -O2` on a fixed 18 × 18 grid of edge values plus 1,000 seeded random input pairs by default. `--cases` changes the random count; the 324 edge pairs are always included. Testing stops at the first mismatch or runtime error and reports both the planned and executed counts. The RNG algorithm is fixed for reproducibility.
+| Model | Thinking | Pass rate | WAT syntax errors | Wasm validation errors | Semantic mismatches | Token limits | Runtime |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.5-4B | Off | 71.9% (23/32) | 6 | 1 | 2 | 0 | 2m 13s |
+| Qwen3.5-4B | On | 21.9% (7/32) | 0 | 0 | 0 | 25 | 3h 41m 48s |
+| Qwen3.8-27B | Off | 96.9% (31/32) | 0 | 0 | 1 | 0 | 4m 39s |
+| Qwen3.8-27B | On | 100% (32/32) | 0 | 0 | 0 | 0 | 43m 11s |
 
-The benchmark calls the same compiler loop as `compile`, with five total attempts by default. It supplies an attempt callback and records the observations in the benchmark crate: each program gets its own directory, with numbered subdirectories under `attempts/` containing inputs, raw responses, diagnostics, and extracted WAT. Ordinary compilation does not attach an attempt callback. The compiler exposes attempt data but does not choose recording paths or persist attempt history. `bench --attempts 1` reproduces the one-shot baselines. The model stays loaded across a benchmark, but every generation attempt receives a fresh inference context. Decoding is greedy. This does **not** promise identical bytes across hardware or inference-library versions.
+Each run used Metal on Apple Silicon, with greedy decoding and five retries. Thinking-off runs allowed 8,192 tokens context and 1,536 tokens output budget. Thinking-on runs allowed 16,384 tokens context and 8,192 tokens output budget.
 
-Every candidate is checked for a correct `(i32, i32) -> i32` export. Execution forbids imports, start functions, globals, memories and tables. Each input runs in a fresh Wasm instance with a 100,000-unit fuel limit. These restrictions are part of this prototype's contract.
+## FAQs
 
-Benchmark output is organized by program:
+### Is this some kind of joke?
 
-```text
-summary.md
-summary.json
-01_add/
-  source.c
-  output.wat
-  output.wasm
-  check.json
-  attempts/
-    1/
-      input.txt
-      raw.txt
-      output.wat
-      report.json
-```
+'tis the best kind of joke– an executable joke.
 
-`summary.md` is the readable report; `summary.json` holds run settings, aggregate counts, and compact per-program results with relative paths to `check.json`. Each program’s `check.json` records overall compilation and behavioral-check results (including counterexamples), and references its attempt reports using paths relative to the program directory.
+### What is wrong with you?
 
-Each attempt saves its input and unmodified model response as text files. Its `report.json` contains status, diagnostics, timing, token counts, and stop reason, without embedding input, response, reasoning, or WAT. `raw.txt` is absent if generation fails; `output.wat` is absent if no WAT could be extracted. Settings record one `chat_mode`: `model_template`, `qwen_no_thinking`, or `qwen_thinking`.
+Would love to know, please do write my doctor a memo if ya figure it out.
 
-The program-level `output.wat` is the final attempt’s extracted candidate, even if assembly fails; `output.wasm` exists only for a validated candidate, including one that subsequently fails differential checking. Earlier attempts’ WAT remains in their own directories.
+### Why doesn't the WAT->WASM part use an LLM too?
 
-A benchmark exits nonzero if any program fails, **after** saving its results. Compilation reports distinguish generation errors, truncation, malformed output (`invalid_output`), WAT parsing errors (`invalid_wat`), invalid Wasm and successful compilation. Harness reports separately record check errors, runtime errors, mismatches and passed tests. Source and model-loading errors stop before the benchmark can run.
+You better believe I tried. Didn't work at all well with small local models.
 
-Compilation time includes inference context creation, prompt processing, generation, assembly and module validation. Weight loading is reported separately; downloading and hashing are outside the compilation measurement. Wasm execution time includes fresh instance creation. The Clang reference timing includes compiling and running the oracle. These are not apples-to-apples code-performance benchmarks.
+## Developing
 
-The eight fixed fixtures exercise addition, unsigned comparison, overflow, shifts, mutation, nested branches, shadowing and complement. Generated programs use four templates with seeded constants and operators. This is a small, structured smoke corpus, not a representative sample of C and not proof of equivalence. SMT verification is deliberately deferred.
+The Nix shell provides the full toolchain needed to develop the project: Rust, Cargo, rustfmt, Clippy, rust-analyzer, Clang/libclang, CMake, and Wasmtime. A healthy state of delirium provides your motivation for attempting.
 
-The compiler and benchmark use the bundled system prompt and write no prompt copies or prompt hashes.
+`neurastheniacc` so far has only been tested on macOS with Apple Silicon. It... might work on Linux? Probably not very fast, though. On Mac inference uses Metal, on Linux it uses your poor overheating CPU. **You** (yes, you!) could probably improve this by contribbing CUDA or something, if you enjoy turning the wheel of samsara.
 
-The bundled prompt is `prompts/compiler.txt`. Historical benchmark references to v4 refer to this same prompt text. Git history preserves earlier versions.
-
-## Development
+Enter the pinned development environment manually, run checks, and build:
 
 ```sh
-cargo test --workspace --release --locked
-cargo clippy --workspace --release --locked --all-targets -- -D warnings
-cargo fmt --all --check
+# duild
+nix develop
+
+# Run checks
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+
+# Build the compiler
+cargo build --workspace --release --locked --bins
 ```
-
-The tests require Clang but no model or network. They check front-end rejection, wrapping arithmetic, unsigned comparison counterexamples, bounded Wasm execution, forbidden module features, generated source validity, cache failure modes, strict output extraction, feedback propagation, retry limits, and stopping on validation success without semantic feedback.
-
-The Cargo workspace contains two packages: `neurastheniacc` owns compilation and its CLI; `neurastheniacc-bench` depends on its public API and owns evaluation. The compiler does not depend on the benchmark harness. Build or test either package with `-p neurastheniacc` or `-p neurastheniacc-bench`.
-
-- `crates/neurastheniacc/src/source.rs`: rejecting C front end; no code generation.
-- `crates/neurastheniacc/src/model.rs`: cache, checksums and embedded inference.
-- `crates/neurastheniacc/src/prompt.rs`: Qwen chat formatting and reasoning boundaries.
-- `crates/neurastheniacc/src/compile.rs`: compilation pipeline, artifacts and compilation reports.
-- `crates/neurastheniacc/src/wasm.rs`: Wasm validation and execution.
-- `crates/neurastheniacc-bench/src/recording.rs`: benchmark attempt files and relative report paths.
-- `crates/neurastheniacc-bench/src/eval.rs`: test harness, native Clang oracle, inputs and corpus generator.
-- `crates/neurastheniacc/src/main.rs`: compiler CLI (`fetch`, `compile`).
-- `crates/neurastheniacc-bench/src/main.rs`: execution and evaluation CLI (`run`, `check`, `bench`).
-- `crates/neurastheniacc/src/cli.rs`: shared model options; `crates/neurastheniacc/src/lib.rs`: shared library entry point.
-- `prompts/compiler.txt`: the bundled C-to-WAT prompt.
-- `fixtures/eval/`: fixed smoke corpus.
-
-`Cargo.lock` pins Rust dependencies, including the bundled llama.cpp revision supplied by `llama-cpp-2`. No SMT solver, DSPy service, or remote inference is involved.
